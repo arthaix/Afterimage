@@ -24,6 +24,7 @@ import ru.arthaix.afterimage.IAfterimageRenderChunk;
 @Mixin(value = RenderChunk.class, remap = false)
 public abstract class MixinRenderChunk implements IAfterimageRenderChunk {
     @Unique private int afterimage$dirtyGen;
+    @Unique private int afterimage$hideFrame = -1;
 
     @Inject(method = "func_178565_b(I)Lnet/minecraft/client/renderer/vertex/VertexBuffer;", at = @At("RETURN"))
     private void afterimage$bindBuffer(int layer, CallbackInfoReturnable<VertexBuffer> cir) {
@@ -59,5 +60,15 @@ public abstract class MixinRenderChunk implements IAfterimageRenderChunk {
     @Override
     public int afterimage$dirtyGen() {
         return this.afterimage$dirtyGen;
+    }
+
+    @Override
+    public int afterimage$hideFrame() {
+        return this.afterimage$hideFrame;
+    }
+
+    @Override
+    public void afterimage$setHideFrame(int frame) {
+        this.afterimage$hideFrame = frame;
     }
 }

@@ -56,7 +56,9 @@ public final class Far {
      * section for this long. Vanilla compiles a section as soon as the chunk arrives, before its tile entities (LittleTiles,
      * Chisels & Bits) are applied, so an immediate handover made buildings vanish and come back while chunks loaded.
      */
-    private static final long SETTLE_NANOS = Long.getLong("afterimage.settleMs", 3000L) * 1_000_000L;
+    private static final long SETTLE_NANOS = Long.getLong("afterimage.settleMs", 20000L) * 1_000_000L;
+    /** Sections nearer than this (blocks, camera to section centre) are never hidden from vanilla: you see your own edits at once. */
+    private static final double HIDE_NEAR = Double.parseDouble(System.getProperty("afterimage.hideNear", "32"));
     /** Server change ticks are compared with client geometry ticks with this slack (the client clock follows the server). */
     public static final long SYNC_TOLERANCE_TICKS = 100;
     private static final int LAYERS = 4;
@@ -84,6 +86,8 @@ public final class Far {
         boolean handedOver;
         /** Vanilla shows this section in the current frame (compiled, chunk loaded). */
         boolean vanillaNow;
+        /** This frame vanilla's half-assembled section is hidden and the copy is drawn in full. */
+        boolean hidingVanilla;
         /** Client world tick at which this geometry was last confirmed by vanilla or written to disk; 0 = unknown. */
         long geomTime;
         long bytes;
@@ -124,6 +128,9 @@ public final class Far {
     private static long evictions;
     private static long errors;
     private static int lastDrawn;
+    private static int lastHidden;
+    /** Incremented once per frame at the SOLID pass; RenderChunks store the frame in which vanilla must skip them. */
+    private static int frame;
     private static int lastDrawnTranslucent;
     private static int lastSkippedVanilla;
     private static int lastCulled;
@@ -187,6 +194,7 @@ public final class Far {
         Entry e = ENTRIES.get(key);
         if (e != null) {
             e.vanillaHash[layer] = ms;
+            e.vanillaChanged = System.nanoTime();
             if (e.hash[layer] != ms) {
                 e.stale = true;
             } else if (!e.stale) {
@@ -340,7 +348,14 @@ public final class Far {
     // ================= render =================
 
     /** Called at the head of RenderGlobal.renderBlockLayer(layer, partialTicks, pass, entity). */
+    public static int frame() {
+        return frame;
+    }
+
     public static void render(BlockRenderLayer layer, double partialTicks, Entity viewer, ViewFrustum frustum) {
+        if (layer == BlockRenderLayer.SOLID) {
+            frame++;
+        }
         if (!ENABLED || layer != BlockRenderLayer.SOLID || viewer == null) {
             return;
         }
@@ -392,6 +407,7 @@ public final class Far {
 
         VISIBLE.clear();
         int skippedVanilla = 0;
+        int hidden = 0;
         int culled = 0;
         ViewFrustumAccessor vf = frustum == null ? null : (ViewFrustumAccessor) (Object) frustum;
         BlockPos.MutableBlockPos probe = new BlockPos.MutableBlockPos();
@@ -405,19 +421,32 @@ public final class Far {
                 continue;
             }
             en.vanillaNow = false;
+            en.hidingVanilla = false;
             if (vf != null) {
                 probe.func_181079_c(en.x, en.y, en.z);
                 RenderChunk rc = vf.afterimage$getRenderChunk(probe);
                 en.vanillaNow = rc != null && rc.func_178568_j().func_177986_g() == en.key
                         && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe);
-                if (en.vanillaNow && settled(en, now)) {
-                    skippedVanilla++;
-                    continue;
+                if (en.vanillaNow) {
+                    if (settled(en, now, rc)) {
+                        skippedVanilla++;
+                        continue;
+                    }
+                    double dx = en.x + 8 - camX;
+                    double dy = en.y + 8 - camY;
+                    double dz = en.z + 8 - camZ;
+                    if (dx * dx + dy * dy + dz * dz > HIDE_NEAR * HIDE_NEAR) {
+                        // vanilla is still assembling this section (tile entities arriving): show the whole copy instead
+                        ((IAfterimageRenderChunk) (Object) rc).afterimage$setHideFrame(frame);
+                        en.hidingVanilla = true;
+                        hidden++;
+                    }
                 }
             }
             VISIBLE.add(en);
         }
         lastSkippedVanilla = skippedVanilla;
+        lastHidden = hidden;
         lastCulled = culled;
         lastDrawn = VISIBLE.size();
         if (VISIBLE.isEmpty()) {
@@ -467,7 +496,7 @@ public final class Far {
             for (int i = 0, n = VISIBLE.size(); i < n; i++) {
                 Entry en = VISIBLE.get(i);
                 // while vanilla is taking a section over it already draws that section's translucent layer
-                if (en.ids[TRANSLUCENT] > 0 && !(en.vanillaNow && en.vanillaHash[TRANSLUCENT] != 0L)) {
+                if (en.ids[TRANSLUCENT] > 0 && !(en.vanillaNow && !en.hidingVanilla && en.vanillaHash[TRANSLUCENT] != 0L)) {
                     double dx = en.x + 8 - camX;
                     double dy = en.y + 8 - camY;
                     double dz = en.z + 8 - camZ;
@@ -543,7 +572,12 @@ public final class Far {
     }
 
     /** True once vanilla may draw the section alone: same geometry as the copy, or no vanilla change for SETTLE_NANOS. */
-    private static boolean settled(Entry e, long now) {
+    /**
+     * True once vanilla may show the section alone: its geometry equals the copy, or the server reported a change newer
+     * than the copy (the copy is known to be outdated), or vanilla has been quiet for SETTLE_NANOS with no rebuild pending.
+     * A static city settles through the first rule as soon as all its tile entities have arrived.
+     */
+    private static boolean settled(Entry e, long now, RenderChunk rc) {
         if (e.handedOver) {
             return true;
         }
@@ -554,7 +588,8 @@ public final class Far {
                 break;
             }
         }
-        if (same || e.vanillaChanged == 0L || now - e.vanillaChanged > SETTLE_NANOS) {
+        boolean quiet = e.vanillaChanged == 0L || (now - e.vanillaChanged > SETTLE_NANOS && !rc.func_178569_m());
+        if (same || quiet || outdated(e.key, e.geomTime)) {
             e.handedOver = true;
             return true;
         }
@@ -758,7 +793,7 @@ public final class Far {
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", fog " + fogEnd + ", invalidated by server " + invalidated
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }

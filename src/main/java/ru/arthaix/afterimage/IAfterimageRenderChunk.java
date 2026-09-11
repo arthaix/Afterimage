@@ -4,4 +4,9 @@ package ru.arthaix.afterimage;
 public interface IAfterimageRenderChunk {
     /** Incremented whenever the world (not the verifier) marks this section dirty, or it moves. */
     int afterimage$dirtyGen();
+
+    /** Far-zone frame in which vanilla must not draw this section (its copy is shown while vanilla assembles it). */
+    int afterimage$hideFrame();
+
+    void afterimage$setHideFrame(int frame);
 }
