@@ -204,7 +204,7 @@ public final class Capture {
                 net.minecraft.client.multiplayer.WorldClient cw = Minecraft.func_71410_x().field_71441_e;
                 long wt = cw == null ? 0L : cw.func_82737_E();
                 Far.onUpload(key, layer, h[1], wt);
-                Disk.onSectionUpload(key, layer, buf, size, h[0], h[1], wt);
+                Disk.onSectionUpload(rc, key, layer, buf, size, h[0], h[1], wt);
             }
             Rec r = SECTIONS.get(key);
             if (r == null) {

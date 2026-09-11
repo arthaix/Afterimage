@@ -15,6 +15,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,7 @@ import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.ViewFrustum;
 import net.minecraft.client.renderer.chunk.CompiledChunk;
+import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.math.BlockPos;
@@ -160,6 +162,30 @@ public final class Disk {
     private static final AtomicLong OUTDATED_SKIPPED = new AtomicLong();
     private static final ConcurrentHashMap<Long, Job> LATEST = new ConcurrentHashMap<Long, Job>();
     private static final HashMap<Long, Long> PENDING_DELETE = new HashMap<Long, Long>();
+
+    /** An upload waiting for vanilla to confirm that its RenderChunk still shows that position. */
+    private static final class Held {
+        final long key;
+        final byte[] data;
+        final long exact;
+        final long ms;
+        final long geomTime;
+
+        Held(long key, byte[] data, long exact, long ms, long geomTime) {
+            this.key = key;
+            this.data = data;
+            this.exact = exact;
+            this.ms = ms;
+            this.geomTime = geomTime;
+        }
+    }
+
+    /** RenderChunk -> uploads per layer not yet confirmed (client thread only) */
+    private static final IdentityHashMap<RenderChunk, Held[]> HELD = new IdentityHashMap<RenderChunk, Held[]>();
+    private static final long HELD_MAX = 256L << 20;
+    private static long heldBytes;
+    private static long heldCommitted;
+    private static long heldDropped;
     private static final ConcurrentLinkedQueue<Loaded> READY = new ConcurrentLinkedQueue<Loaded>();
 
     private static final AtomicLong BACKLOG = new AtomicLong();
@@ -207,6 +233,8 @@ public final class Disk {
         ONDISK.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
+        HELD.clear();
+        heldBytes = 0L;
         Loaded l;
         while ((l = READY.poll()) != null) {
             READY_BYTES.addAndGet(-l.data.capacity());
@@ -245,6 +273,8 @@ public final class Disk {
         ONDISK_TIME.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
+        HELD.clear();
+        heldBytes = 0L;
         Loaded l;
         while ((l = READY.poll()) != null) {
             READY_BYTES.addAndGet(-l.data.capacity());
@@ -435,7 +465,80 @@ public final class Disk {
     // ================= write side =================
 
     /** Main thread, from Capture.onUpload. layer 0..2, 28-byte vertex format. */
-    public static void onSectionUpload(long key, int layer, ByteBuffer buf, int size, long exact, long ms, long geomTime) {
+    /**
+     * Client thread, from Capture.onUpload. An upload is written only when its RenderChunk vouches for it at its current
+     * position: either the current compiled chunk already has that layer (a rebuild in place, or a translucent resort),
+     * or vanilla later sets a compiled chunk with that layer for the same position. Vanilla queues uploads for the client
+     * thread; one queued before the RenderChunk moved arrives under the new position with the old position's geometry.
+     * Such uploads are held and dropped when the RenderChunk moves again, frees its buffers, or compiles without that layer.
+     */
+    public static void onSectionUpload(RenderChunk rc, long key, int layer, ByteBuffer buf, int size, long exact, long ms, long geomTime) {
+        CompiledChunk cc = rc.func_178571_g();
+        if (cc != null && cc != CompiledChunk.field_178502_a && !cc.func_178491_b(BlockRenderLayer.values()[layer])) {
+            commitUpload(key, layer, buf, null, size, exact, ms, geomTime);
+            return;
+        }
+        if (!ENABLED || worldDir == null || size <= 0 || heldBytes + size > HELD_MAX) {
+            return;
+        }
+        Held[] held = HELD.get(rc);
+        if (held == null) {
+            held = new Held[4];
+            HELD.put(rc, held);
+        }
+        if (held[layer] != null) {
+            heldBytes -= held[layer].data.length;
+        }
+        byte[] data = new byte[size];
+        buf.duplicate().get(data);
+        held[layer] = new Held(key, data, exact, ms, geomTime);
+        heldBytes += size;
+    }
+
+    /** RenderChunk.setCompiledChunk HEAD: vanilla confirmed what this RenderChunk shows at its position. */
+    public static void onCompiled(RenderChunk rc, CompiledChunk next) {
+        if (!Capture.onMainThread()) {
+            return;
+        }
+        Held[] held = HELD.remove(rc);
+        if (held == null) {
+            return;
+        }
+        long key = rc.func_178568_j().func_177986_g();
+        BlockRenderLayer[] layers = BlockRenderLayer.values();
+        for (int l = 0; l < held.length; l++) {
+            Held h = held[l];
+            if (h == null) {
+                continue;
+            }
+            heldBytes -= h.data.length;
+            if (next != null && next != CompiledChunk.field_178502_a && h.key == key && !next.func_178491_b(layers[l])) {
+                commitUpload(h.key, l, null, h.data, h.data.length, h.exact, h.ms, h.geomTime);
+                heldCommitted++;
+            } else {
+                heldDropped++;
+            }
+        }
+    }
+
+    /** RenderChunk.setPosition / deleteGlResources HEAD: uploads held for it belong nowhere now. */
+    public static void dropHeld(RenderChunk rc) {
+        if (!Capture.onMainThread()) {
+            return;
+        }
+        Held[] held = HELD.remove(rc);
+        if (held == null) {
+            return;
+        }
+        for (Held h : held) {
+            if (h != null) {
+                heldBytes -= h.data.length;
+                heldDropped++;
+            }
+        }
+    }
+
+    private static void commitUpload(long key, int layer, ByteBuffer buf, byte[] heldData, int size, long exact, long ms, long geomTime) {
         File dir = worldDir;
         if (!ENABLED || dir == null || size <= 0) {
             return;
@@ -460,8 +563,11 @@ public final class Disk {
         if (BACKLOG.get() + size > WRITE_BACKLOG_MAX) {
             return;
         }
-        byte[] data = new byte[size];
-        buf.duplicate().get(data);
+        byte[] data = heldData;
+        if (data == null) {
+            data = new byte[size];
+            buf.duplicate().get(data);
+        }
         final Job job = new Job(sk, key, layer, data, exact, ms, geomTime, dir, generation);
         LATEST.put(sk, job);
         BACKLOG.addAndGet(size);
@@ -579,6 +685,8 @@ public final class Disk {
         ONDISK.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
+        HELD.clear();
+        heldBytes = 0L;
         WRITER.submit(() -> {
             deleteTree(dir);
             dir.mkdirs();
@@ -820,6 +928,6 @@ public final class Disk {
             + "), deleted " + DELETED.get() + ", loaded " + LOADED_FILES.get() + " ("
             + String.format("%.0f MB", LOADED_RAW.get() / 1048576.0) + "), to GPU " + uploadedFromDisk + ", skipped "
             + rejectedFromDisk + ", over budget " + OVER_BUDGET.get() + ", backlog "
-            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", errors " + ERRORS.get();
+            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", uploads confirmed later " + heldCommitted + ", dropped as not owned " + heldDropped + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", errors " + ERRORS.get();
     }
 }

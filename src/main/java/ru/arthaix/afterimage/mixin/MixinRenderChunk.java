@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import ru.arthaix.afterimage.Capture;
+import ru.arthaix.afterimage.Disk;
 import ru.arthaix.afterimage.Far;
 import ru.arthaix.afterimage.IAfterimageRenderChunk;
 
@@ -39,16 +40,19 @@ public abstract class MixinRenderChunk implements IAfterimageRenderChunk {
     @Inject(method = "func_189562_a(III)V", at = @At("HEAD"))
     private void afterimage$moved(int x, int y, int z, CallbackInfo ci) {
         Far.onLeave((RenderChunk) (Object) this);
+        Disk.dropHeld((RenderChunk) (Object) this);
         this.afterimage$dirtyGen++;
     }
 
     @Inject(method = "func_178566_a()V", at = @At("HEAD"))
     private void afterimage$deleting(CallbackInfo ci) {
         Far.onLeave((RenderChunk) (Object) this);
+        Disk.dropHeld((RenderChunk) (Object) this);
     }
 
     @Inject(method = "func_178580_a(Lnet/minecraft/client/renderer/chunk/CompiledChunk;)V", at = @At("HEAD"))
     private void afterimage$compiled(CompiledChunk next, CallbackInfo ci) {
+        Disk.onCompiled((RenderChunk) (Object) this, next);
         Far.onCompiledReplace((RenderChunk) (Object) this, next);
     }
 
