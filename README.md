@@ -28,6 +28,8 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
 ## Usage
 
 Put the jar into the `mods` folder of the client together with MixinBooter. Nothing is needed on the server.
+Keep the file name `z-afterimage-<version>.jar`: Forge loads coremods in file-name order, and a name that sorts
+before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/rong/mixinbooter/IEarlyMixinLoader`.
 
 1. Recommended video settings: **Render Distance** 16-24 (the far zone keeps the rest), OptiFine **Fog: Off**
    (copies are drawn without fog), OptiFine **Render Regions: Off** (required).
@@ -94,7 +96,7 @@ libs/lwjgl-2.9.4.jar               LWJGL 2.9.4-nightly-20150209
 then
 
 ```
-JAVA8_HOME=/path/to/jdk8 ./build.sh     # build/afterimage-<version>.jar
+JAVA8_HOME=/path/to/jdk8 ./build.sh     # build/z-afterimage-<version>.jar
 ```
 
 `tools/analyze_quads.py [samples dir]` measures how compressible captured geometry is,

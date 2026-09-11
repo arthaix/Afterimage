@@ -28,5 +28,8 @@ mkdir -p "$CLASSES"
 
 cp src/main/resources/mixins.afterimage.json "$CLASSES/"
 sed "s/\${version}/$VERSION/" src/main/resources/mcmod.info > "$CLASSES/mcmod.info"
-"$JDK/bin/jar" cfm "build/afterimage-$VERSION.jar" src/main/resources/META-INF/MANIFEST.MF -C "$CLASSES" .
-echo "built build/afterimage-$VERSION.jar"
+# FML loads coremod jars in file-name order and this one needs MixinBooter already loaded,
+# so the file name has to sort after "mixinbooter"
+JAR="build/z-afterimage-$VERSION.jar"
+"$JDK/bin/jar" cfm "$JAR" src/main/resources/META-INF/MANIFEST.MF -C "$CLASSES" .
+echo "built $JAR"
