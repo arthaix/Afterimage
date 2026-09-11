@@ -258,6 +258,12 @@ public final class Disk {
         WRITER.submit(() -> write(job));
     }
 
+    /** Multiset fingerprint of the layer as stored on disk, 0 when not on disk. */
+    public static long diskHash(long key, int layer) {
+        Long v = ONDISK.get(key * 4 + layer);
+        return v == null ? 0L : v;
+    }
+
     /** Main thread, from Far.onCompiledReplace when the chunk is loaded and vanilla compiled the section. */
     public static void onVanillaCompiled(long key, CompiledChunk next) {
         if (!ENABLED || worldDir == null || next == null) {

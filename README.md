@@ -11,14 +11,18 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
 ## Features
 
 - **Exact, not LOD**: the far zone draws the very bytes the game uploaded for each section. No downsampling, no
-  simplified buildings. Rebuild determinism and capture correctness are checked in game by a built-in verifier.
+  simplified buildings. Rebuild determinism and capture correctness were proven in game by a built-in verifier
+  (`-Dafterimage.verify=true`).
 - **Copied on the GPU**: section geometry is duplicated with `glCopyBufferSubData` at the moment vanilla would lose it,
-  with no readback to the CPU and no hitch.
+  with no readback to the CPU and no GL queries that would stall on the driver.
 - **Persistent**: sections are written to a per-server, per-dimension cache in the background (deflate, atomic writes,
   newer versions supersede queued older ones). On join the cache is restored nearest-first, uploaded to the GPU for at
   most 4 ms per frame.
-- **Never fights vanilla**: a section vanilla shows itself always wins; a copy is freed as soon as its chunk is loaded
-  and compiled again, and the cache is refreshed from that new build.
+- **Never fights vanilla**: a section vanilla shows itself always wins. Its copy stays in VRAM and is replaced only if
+  the section's geometry changed (upload fingerprints), so flying back and forth costs no copies; the disk cache is
+  refreshed from every new build.
+- **Seamless fog**: while the far zone has content, normal fog is pushed out (2048 blocks by default), so near terrain
+  and far zone fade into the sky together. Water, lava and blindness keep their vanilla fog.
 - **Budgeted**: 8 GB of VRAM for the far zone by default, farthest sections are evicted first.
 - **Works with** OptiFine (Render Regions off), Chisels & Bits and LittleTiles, including LittleTiles' merged
   re-uploads of chunk buffers.
@@ -31,8 +35,8 @@ Put the jar into the `mods` folder of the client together with MixinBooter. Noth
 Keep the file name `z-afterimage-<version>.jar`: Forge loads coremods in file-name order, and a name that sorts
 before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/rong/mixinbooter/IEarlyMixinLoader`.
 
-1. Recommended video settings: **Render Distance** 16-24 (the far zone keeps the rest), OptiFine **Fog: Off**
-   (copies are drawn without fog), OptiFine **Render Regions: Off** (required).
+1. Recommended video settings: **Render Distance** 16-24 (the far zone keeps the rest), OptiFine **Render Regions:
+   Off** (required). Fog can stay on.
 2. Play. Every place you visit is cached as you see it.
 3. Rejoin: the cached city is on screen again within seconds, before the server has sent a single far chunk.
 
@@ -44,11 +48,12 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 /afterimage                 status: GPU section geometry, far zone, disk cache, verifier
 /afterimage far             far zone status
 /afterimage far off|on      disable the far zone (frees all copies) / enable it again
+/afterimage fog [blocks]    show / set where fog ends while the far zone is shown (0 = vanilla fog)
 /afterimage disk            disk cache status
 /afterimage disk off|on     stop / resume writing and restoring the cache
 /afterimage disk clear      delete the cache of the current server and dimension
 /afterimage csv             write per-section geometry sizes to afterimage/sections.csv
-/afterimage off|on          stop / resume capture and verification
+/afterimage off|on          stop / resume upload tracking
 ```
 
 ## Configuration (JVM arguments)
@@ -58,9 +63,12 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 | `-Dafterimage.far` | true | far zone on or off |
 | `-Dafterimage.farBudgetMB` | 8192 | VRAM for far-zone copies, farthest evicted first |
 | `-Dafterimage.farPlane` | 8192 | far clipping plane used for the far zone, in blocks |
+| `-Dafterimage.farNear` | 6 | near clipping plane of the far pass, in blocks (depth precision far away) |
+| `-Dafterimage.fogEnd` | 2048 | fog end while the far zone has content, in blocks; 0 keeps vanilla fog |
 | `-Dafterimage.disk` | true | disk cache on or off |
 | `-Dafterimage.diskUploadMs` | 4 | per-frame time budget for uploading restored sections |
-| `-Dafterimage.enabled` | true | capture, verifier and measurements |
+| `-Dafterimage.enabled` | true | upload tracking and measurements (far-zone reuse and the disk cache rely on it) |
+| `-Dafterimage.verify` | false | development only: verifier (forced rebuilds, GPU readbacks) and raw geometry samples |
 
 ## Files
 

@@ -1,6 +1,7 @@
 package ru.arthaix.afterimage;
 
 import net.minecraftforge.client.event.ClientChatEvent;
+import net.minecraftforge.client.event.EntityViewRenderEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -16,7 +17,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
      dependencies = "required-after:mixinbooter@[10.0,)", acceptableRemoteVersions = "*", clientSideOnly = true)
 public class Afterimage {
     public static final String MODID = "afterimage";
-    public static final String VERSION = "0.3.0";
+    public static final String VERSION = "0.3.1";
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
@@ -29,6 +30,11 @@ public class Afterimage {
         if (event.phase == TickEvent.Phase.END) {
             Capture.tick();
         }
+    }
+
+    @SubscribeEvent
+    public void onFog(EntityViewRenderEvent.RenderFogEvent event) {
+        Far.onFog(event.getEntity(), event.getState(), event.getFogMode(), event.getFarPlaneDistance());
     }
 
     @SubscribeEvent

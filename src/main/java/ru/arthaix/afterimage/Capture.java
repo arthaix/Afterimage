@@ -42,6 +42,8 @@ import org.lwjgl.opengl.GL15;
 public final class Capture {
     public static volatile boolean ENABLED = !"false".equals(System.getProperty("afterimage.enabled"));
     public static boolean selfMark;
+    /** Phase 0 verifier and raw samples: forced rebuilds and GPU readbacks, for development only. */
+    private static final boolean VERIFY = Boolean.getBoolean("afterimage.verify");
 
     private static final int LAYERS = 4;
     private static final long SEC = 1_000_000_000L;
@@ -195,8 +197,11 @@ public final class Capture {
             hashNanos += now - t;
 
             long key = rc.func_178568_j().func_177986_g();
-            sample(vb, buf, key, layer, size, vs, now);
+            if (VERIFY) {
+                sample(vb, buf, key, layer, size, vs, now);
+            }
             if (layer < 3 && vs == 28) {
+                Far.onUpload(key, layer, h[1]);
                 Disk.onSectionUpload(key, layer, buf, size, h[0], h[1]);
             }
             Rec r = SECTIONS.get(key);
@@ -262,7 +267,9 @@ public final class Capture {
                 lastCsv = now;
                 writeCsv();
             }
-            verifierTick(now);
+            if (VERIFY) {
+                verifierTick(now);
+            }
         } catch (Throwable t) {
             fail("tick", t);
         }
@@ -305,6 +312,12 @@ public final class Capture {
             } else if (arg.equals("disk clear")) {
                 Disk.clearWorld();
                 say("disk cache for this server and dimension is being deleted");
+            } else if (arg.equals("fog") || arg.startsWith("fog ")) {
+                String v = arg.substring(3).trim();
+                if (!v.isEmpty()) {
+                    Far.fogEnd = Math.max(0, Integer.parseInt(v));
+                }
+                say("far zone fog ends at " + Far.fogEnd + " blocks (0 = vanilla fog)");
             } else if (arg.equals("csv")) {
                 writeCsv();
                 say("csv written to afterimage/sections.csv");
@@ -318,6 +331,12 @@ public final class Capture {
             fail("onChat", t);
         }
         return true;
+    }
+
+    /** Fingerprint of the last upload of that section layer if its size matches, else 0 (unknown). */
+    public static long layerHash(long key, int layer, int size) {
+        Rec r = SECTIONS.get(key);
+        return r != null && r.size[layer] == size ? r.ms[layer] : 0L;
     }
 
     // ================= geometry samples =================
