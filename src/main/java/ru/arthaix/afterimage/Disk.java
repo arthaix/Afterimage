@@ -25,6 +25,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.WorldClient;
@@ -33,6 +35,7 @@ import net.minecraft.client.renderer.chunk.CompiledChunk;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 
 /**
  * Afterimage phase 2: persistent far zone.
@@ -51,7 +54,8 @@ public final class Disk {
     public static volatile boolean ENABLED = !"false".equals(System.getProperty("afterimage.disk"));
 
     private static final int MAGIC = 0x41494D47;
-    private static final int VERSION = 1;
+    /** 2 adds the geometry tick; version 1 files are still read (tick unknown). */
+    private static final int VERSION = 2;
     private static final int VS = 28;
     private static final long DELETE_GRACE = 30_000_000_000L;
     private static final long WRITE_BACKLOG_MAX = 1L << 30;
@@ -73,7 +77,10 @@ public final class Disk {
         final File dir;
         final int gen;
 
-        Job(long sk, long key, int layer, byte[] data, long exact, long ms, File dir, int gen) {
+        final long geomTime;
+
+        Job(long sk, long key, int layer, byte[] data, long exact, long ms, long geomTime, File dir, int gen) {
+            this.geomTime = geomTime;
             this.sk = sk;
             this.key = key;
             this.layer = layer;
@@ -94,7 +101,10 @@ public final class Disk {
         final ByteBuffer data;
         final int gen;
 
-        Loaded(long key, int layer, int x, int y, int z, ByteBuffer data, int gen) {
+        final long geomTime;
+
+        Loaded(long key, int layer, int x, int y, int z, ByteBuffer data, long geomTime, int gen) {
+            this.geomTime = geomTime;
             this.key = key;
             this.layer = layer;
             this.x = x;
@@ -116,7 +126,12 @@ public final class Disk {
         final int comp;
         double dist2;
 
-        Meta(File file, long key, int layer, int x, int y, int z, int raw, int comp) {
+        final long geomTime;
+        final int headerLen;
+
+        Meta(File file, long key, int layer, int x, int y, int z, int raw, int comp, long geomTime, int headerLen) {
+            this.geomTime = geomTime;
+            this.headerLen = headerLen;
             this.file = file;
             this.key = key;
             this.layer = layer;
@@ -130,6 +145,19 @@ public final class Disk {
 
     /** section key * 4 + layer -> multiset fingerprint of what is on disk. */
     private static final ConcurrentHashMap<Long, Long> ONDISK = new ConcurrentHashMap<Long, Long>(65536);
+    /** section key * 4 + layer -> client world tick of the geometry on disk (0 = unknown, version 1 file). */
+    private static final ConcurrentHashMap<Long, Long> ONDISK_TIME = new ConcurrentHashMap<Long, Long>(65536);
+
+    // ---- server sync state (client thread) ----
+    private static final long SYNC_SAFETY_TICKS = 1200;
+    private static volatile boolean awaitingServer;
+    private static long awaitSince;
+    private static long lastSync;
+    private static long lastSyncWritten;
+    private static long lastSyncWriteNanos;
+    private static volatile String syncWorldId;
+    private static final AtomicLong INVALIDATED_FILES = new AtomicLong();
+    private static final AtomicLong OUTDATED_SKIPPED = new AtomicLong();
     private static final ConcurrentHashMap<Long, Job> LATEST = new ConcurrentHashMap<Long, Job>();
     private static final HashMap<Long, Long> PENDING_DELETE = new HashMap<Long, Long>();
     private static final ConcurrentLinkedQueue<Loaded> READY = new ConcurrentLinkedQueue<Loaded>();
@@ -174,6 +202,7 @@ public final class Disk {
     // ================= world lifecycle (main thread) =================
 
     public static void onWorld(WorldClient w) {
+        flushSync();
         generation++;
         ONDISK.clear();
         LATEST.clear();
@@ -188,6 +217,19 @@ public final class Disk {
             status = "no world";
             return;
         }
+        ONDISK_TIME.clear();
+        lastSync = 0L;
+        lastSyncWritten = 0L;
+        syncWorldId = null;
+        if (ClientSync.serverHasAfterimage()) {
+            // the server tracks chunk changes: wait for its world id and change list before touching the cache
+            worldDir = null;
+            awaitingServer = true;
+            awaitSince = System.nanoTime();
+            status = "waiting for server";
+            return;
+        }
+        awaitingServer = false;
         File dir = new File(root, serverId() + File.separator + "DIM" + w.field_73011_w.func_186058_p().func_186068_a());
         dir.mkdirs();
         worldDir = dir;
@@ -195,7 +237,170 @@ public final class Disk {
         status = "waiting for player";
     }
 
+    /** Client thread, on the server's Hello: use the cache of that world and dimension; returns the sync point to ask for. */
+    public static long beginServerWorld(String worldId, int dim) {
+        flushSync();
+        generation++;
+        ONDISK.clear();
+        ONDISK_TIME.clear();
+        LATEST.clear();
+        PENDING_DELETE.clear();
+        Loaded l;
+        while ((l = READY.poll()) != null) {
+            READY_BYTES.addAndGet(-l.data.capacity());
+        }
+        scanPending = false;
+        if (root == null) {
+            return 0L;
+        }
+        String id = worldId.replaceAll("[^A-Za-z0-9._-]", "_");
+        File server = new File(root, serverId());
+        File dir = new File(server, id + File.separator + "DIM" + dim);
+        File legacy = new File(server, "DIM" + dim);
+        if (!dir.exists() && legacy.isDirectory()) {
+            // a cache made before the server had Afterimage belongs to the world the server runs now
+            try {
+                dir.getParentFile().mkdirs();
+                Files.move(legacy.toPath(), dir.toPath());
+                Capture.logInfo("disk: adopted the cache in " + legacy + " for world " + id);
+            } catch (Throwable t) {
+                Capture.logError("disk.adopt", t);
+            }
+        }
+        dir.mkdirs();
+        worldDir = dir;
+        syncWorldId = id;
+        lastSync = readSync(dir);
+        lastSyncWritten = lastSync;
+        awaitingServer = true;
+        awaitSince = System.nanoTime();
+        status = "syncing with server";
+        return Math.max(0L, lastSync - SYNC_SAFETY_TICKS);
+    }
+
+    /** Client thread: the server's answer to Sync has been applied; the cache may be loaded now. */
+    public static void serverSyncDone() {
+        awaitingServer = false;
+        if (worldDir != null) {
+            scanPending = true;
+            status = "waiting for player";
+        }
+    }
+
+    /** Client thread: every server change up to serverTime has been applied. */
+    public static void noteSync(long serverTime) {
+        if (serverTime <= lastSync) {
+            return;
+        }
+        lastSync = serverTime;
+        if (System.nanoTime() - lastSyncWriteNanos > 10_000_000_000L) {
+            flushSync();
+        }
+    }
+
+    private static void flushSync() {
+        final File dir = worldDir;
+        final long value = lastSync;
+        if (dir == null || syncWorldId == null || value <= lastSyncWritten) {
+            return;
+        }
+        lastSyncWritten = value;
+        lastSyncWriteNanos = System.nanoTime();
+        // queued behind the deletions this sync point covers
+        WRITER.submit(() -> writeSync(dir, value));
+    }
+
+    private static long readSync(File dir) {
+        File f = new File(dir, "sync.txt");
+        try {
+            if (f.isFile()) {
+                return Long.parseLong(new String(Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.US_ASCII).trim());
+            }
+        } catch (Throwable t) {
+            Capture.logError("disk.readSync", t);
+        }
+        return 0L;
+    }
+
+    private static void writeSync(File dir, long value) {
+        try {
+            File tmp = new File(dir, "sync.txt.tmp");
+            Files.write(tmp.toPath(), Long.toString(value).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            Files.move(tmp.toPath(), new File(dir, "sync.txt").toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable t) {
+            Capture.logError("disk.writeSync", t);
+        }
+    }
+
+    private static long chunkKeyOf(long sectionKey) {
+        BlockPos p = BlockPos.func_177969_a(sectionKey);
+        return ChunkPos.func_77272_a(p.func_177958_n() >> 4, p.func_177952_p() >> 4);
+    }
+
+    /** Client thread: delete cached layers of chunk (cx, cz) whose geometry predates server tick t. */
+    public static void invalidateChunk(int cx, int cz, long t) {
+        final File dir = worldDir;
+        if (dir == null) {
+            return;
+        }
+        final int gen = generation;
+        for (int sy = 0; sy < 16; sy++) {
+            long key = new BlockPos(cx << 4, sy << 4, cz << 4).func_177986_g();
+            for (int l = 0; l < 4; l++) {
+                final long sk = key * 4 + l;
+                Long dt = ONDISK_TIME.get(sk);
+                if (dt == null || dt + Far.SYNC_TOLERANCE_TICKS >= t) {
+                    continue;
+                }
+                Job q = LATEST.get(sk);
+                if (q != null && q.geomTime + Far.SYNC_TOLERANCE_TICKS >= t) {
+                    continue;
+                }
+                PENDING_DELETE.remove(sk);
+                ONDISK_TIME.remove(sk);
+                INVALIDATED_FILES.incrementAndGet();
+                final long tt = t;
+                WRITER.submit(() -> deleteIfOlder(dir, gen, sk, tt));
+            }
+        }
+    }
+
+    private static void deleteIfOlder(File dir, int gen, long sk, long t) {
+        try {
+            if (dir == null || gen != generation || LATEST.containsKey(sk)) {
+                return;
+            }
+            File f = fileFor(dir, sk >> 2, (int) (sk & 3));
+            Meta m = f.isFile() ? readHeader(f) : null;
+            if (m != null && m.geomTime + Far.SYNC_TOLERANCE_TICKS < t && f.delete()) {
+                DELETED.incrementAndGet();
+                ONDISK.remove(sk);
+                ONDISK_TIME.remove(sk);
+            }
+        } catch (Throwable e) {
+            ERRORS.incrementAndGet();
+            Capture.logError("disk.invalidate", e);
+        }
+    }
+
     public static void tick(long now) {
+        if (awaitingServer && now - awaitSince > 20_000_000_000L) {
+            awaitingServer = false;
+            Minecraft mcw = Minecraft.func_71410_x();
+            if (worldDir == null && mcw.field_71441_e != null && root != null) {
+                File dir = new File(root, serverId() + File.separator + "DIM" + mcw.field_71441_e.field_73011_w.func_186058_p().func_186068_a());
+                dir.mkdirs();
+                worldDir = dir;
+                Capture.logInfo("disk: no answer from the server's Afterimage within 20 s, using the local cache");
+            }
+            if (worldDir != null) {
+                scanPending = true;
+                status = "waiting for player";
+            }
+        }
+        if (lastSync > lastSyncWritten && now - lastSyncWriteNanos > 10_000_000_000L) {
+            flushSync();
+        }
         if (!ENABLED || worldDir == null) {
             return;
         }
@@ -209,7 +414,8 @@ public final class Disk {
             final int gen = generation;
             final File dir = worldDir;
             final long budget = Far.budget();
-            LOADER.submit(() -> loadAll(dir, gen, px, py, pz, budget));
+            final Long2LongOpenHashMap changes = Far.changesSnapshot();
+            LOADER.submit(() -> loadAll(dir, gen, px, py, pz, budget, changes));
         }
         if (!PENDING_DELETE.isEmpty()) {
             for (Iterator<Map.Entry<Long, Long>> it = PENDING_DELETE.entrySet().iterator(); it.hasNext();) {
@@ -229,7 +435,7 @@ public final class Disk {
     // ================= write side =================
 
     /** Main thread, from Capture.onUpload. layer 0..2, 28-byte vertex format. */
-    public static void onSectionUpload(long key, int layer, ByteBuffer buf, int size, long exact, long ms) {
+    public static void onSectionUpload(long key, int layer, ByteBuffer buf, int size, long exact, long ms, long geomTime) {
         File dir = worldDir;
         if (!ENABLED || dir == null || size <= 0) {
             return;
@@ -244,7 +450,11 @@ public final class Disk {
         } else {
             Long d = ONDISK.get(sk);
             if (d != null && d == ms) {
-                return;
+                Long dt = ONDISK_TIME.get(sk);
+                if (dt == null || !Far.outdated(key, dt)) {
+                    return;
+                }
+                // same bytes, but the file's tick predates a server change: rewrite it with the current tick
             }
         }
         if (BACKLOG.get() + size > WRITE_BACKLOG_MAX) {
@@ -252,7 +462,7 @@ public final class Disk {
         }
         byte[] data = new byte[size];
         buf.duplicate().get(data);
-        final Job job = new Job(sk, key, layer, data, exact, ms, dir, generation);
+        final Job job = new Job(sk, key, layer, data, exact, ms, geomTime, dir, generation);
         LATEST.put(sk, job);
         BACKLOG.addAndGet(size);
         WRITER.submit(() -> write(job));
@@ -320,6 +530,7 @@ public final class Disk {
                 out.writeInt(j.data.length);
                 out.writeLong(j.exact);
                 out.writeLong(j.ms);
+                out.writeLong(j.geomTime);
                 out.writeInt(bos.size());
                 bos.writeTo(out);
             }
@@ -329,6 +540,7 @@ public final class Disk {
                 Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
             ONDISK.put(j.sk, j.ms);
+            ONDISK_TIME.put(j.sk, j.geomTime);
             WRITTEN_FILES.incrementAndGet();
             WRITTEN_RAW.addAndGet(j.data.length);
             WRITTEN_COMP.addAndGet(bos.size());
@@ -351,6 +563,7 @@ public final class Disk {
                 DELETED.incrementAndGet();
             }
             ONDISK.remove(sk);
+            ONDISK_TIME.remove(sk);
         } catch (Throwable t) {
             ERRORS.incrementAndGet();
             Capture.logError("disk.delete", t);
@@ -384,7 +597,7 @@ public final class Disk {
 
     // ================= load side =================
 
-    private static void loadAll(File dir, int gen, double px, double py, double pz, long budget) {
+    private static void loadAll(File dir, int gen, double px, double py, double pz, long budget, Long2LongOpenHashMap changes) {
         try {
             status = "scanning";
             ArrayList<Meta> metas = new ArrayList<Meta>();
@@ -413,8 +626,17 @@ public final class Disk {
                         if (m == null) {
                             continue;
                         }
+                        long ct = changes.get(chunkKeyOf(m.key));
+                        if (ct != 0L && ct > m.geomTime + Far.SYNC_TOLERANCE_TICKS) {
+                            // the server changed this chunk after the geometry was made
+                            final long sk = m.key * 4 + m.layer;
+                            WRITER.submit(() -> deleteIfOlder(dir, gen, sk, ct));
+                            INVALIDATED_FILES.incrementAndGet();
+                            continue;
+                        }
                         metas.add(m);
                         ONDISK.put(m.key * 4 + m.layer, readHash(f));
+                        ONDISK_TIME.put(m.key * 4 + m.layer, m.geomTime);
                         SCANNED.incrementAndGet();
                         SCANNED_COMP.addAndGet(m.comp);
                     }
@@ -452,7 +674,7 @@ public final class Disk {
                 if (data == null) {
                     continue;
                 }
-                READY.add(new Loaded(m.key, m.layer, m.x, m.y, m.z, data, gen));
+                READY.add(new Loaded(m.key, m.layer, m.x, m.y, m.z, data, m.geomTime, gen));
                 READY_BYTES.addAndGet(data.capacity());
                 used += m.raw;
                 LOADED_FILES.incrementAndGet();
@@ -477,7 +699,11 @@ public final class Disk {
 
     private static Meta readHeader(File f) {
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 64))) {
-            if (in.readInt() != MAGIC || in.readInt() != VERSION) {
+            if (in.readInt() != MAGIC) {
+                return null;
+            }
+            int version = in.readInt();
+            if (version != 1 && version != 2) {
                 return null;
             }
             int layer = in.readInt();
@@ -488,11 +714,12 @@ public final class Disk {
             int raw = in.readInt();
             in.readLong();
             in.readLong();
+            long geomTime = version >= 2 ? in.readLong() : 0L;
             int comp = in.readInt();
             if (vs != VS || layer < 0 || layer > 3 || raw <= 0 || raw % (VS * 4) != 0 || comp <= 0) {
                 return null;
             }
-            return new Meta(f, new BlockPos(x, y, z).func_177986_g(), layer, x, y, z, raw, comp);
+            return new Meta(f, new BlockPos(x, y, z).func_177986_g(), layer, x, y, z, raw, comp, geomTime, version >= 2 ? 60 : 52);
         } catch (Throwable t) {
             readError("header", f, t);
             return null;
@@ -510,7 +737,7 @@ public final class Disk {
 
     private static ByteBuffer readBody(Meta m) {
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(m.file), 1 << 16))) {
-            in.skipBytes(4 * 8 + 8 + 8 + 4);
+            in.skipBytes(m.headerLen);
             byte[] comp = new byte[m.comp];
             in.readFully(comp);
             Inflater inf = new Inflater();
@@ -554,8 +781,12 @@ public final class Disk {
             if (l.gen != generation) {
                 continue;
             }
+            if (Far.outdated(l.key, l.geomTime)) {
+                OUTDATED_SKIPPED.incrementAndGet();
+                continue;
+            }
             if (Far.acceptFromDisk(l.key, l.layer, l.x, l.y, l.z, frustum)) {
-                Far.uploadLayer(l.key, l.x, l.y, l.z, l.layer, l.data);
+                Far.uploadLayer(l.key, l.x, l.y, l.z, l.layer, l.data, l.geomTime);
                 uploadedFromDisk++;
             } else {
                 rejectedFromDisk++;
@@ -583,12 +814,12 @@ public final class Disk {
     }
 
     public static String summary() {
-        return "disk " + (ENABLED ? "ON" : "OFF") + " [" + status + "]: on disk " + SCANNED.get() + " files ("
+        return "disk " + (ENABLED ? "ON" : "OFF") + " [" + status + (syncWorldId != null ? ", world " + syncWorldId + " synced to tick " + lastSync : "") + "]: on disk " + SCANNED.get() + " files ("
             + String.format("%.0f MB", SCANNED_COMP.get() / 1048576.0) + " at join), written " + WRITTEN_FILES.get() + " ("
             + String.format("%.0f MB -> %.0f MB", WRITTEN_RAW.get() / 1048576.0, WRITTEN_COMP.get() / 1048576.0)
             + "), deleted " + DELETED.get() + ", loaded " + LOADED_FILES.get() + " ("
             + String.format("%.0f MB", LOADED_RAW.get() / 1048576.0) + "), to GPU " + uploadedFromDisk + ", skipped "
             + rejectedFromDisk + ", over budget " + OVER_BUDGET.get() + ", backlog "
-            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", errors " + ERRORS.get();
+            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", errors " + ERRORS.get();
     }
 }

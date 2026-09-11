@@ -30,12 +30,18 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
 - **Budgeted**: 8 GB of VRAM for the far zone by default, farthest sections are evicted first.
 - **Works with** OptiFine (Render Regions off), Chisels & Bits and LittleTiles, including LittleTiles' merged
   re-uploads of chunk buffers.
+- **Server sync (optional)**: with Afterimage on the server, the server records the tick of every change clients
+  have to re-render (block changes and block update notifications, which LittleTiles and Chisels & Bits use for their
+  own edits; chunk loading does not count). On join the client asks for everything since its last sync and drops copies
+  and cached files made before those changes; while playing, new changes arrive every second.
 - **Measures itself**: live section-geometry VRAM, unique meshes, per-section sizes (`sections.csv`) and raw geometry
   samples for offline analysis.
 
 ## Usage
 
-Put the jar into the `mods` folder of the client together with MixinBooter. Nothing is needed on the server.
+Put the jar into the `mods` folder of the client together with MixinBooter. The server does not need it, but it
+helps: put the same jar (with MixinBooter) on the server too, and it tells clients which chunks changed while they were
+away, so a cache never shows buildings that no longer exist, and caches of different worlds on one server stay apart.
 Keep the file name `z-afterimage-<version>.jar`: Forge loads coremods in file-name order, and a name that sorts
 before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/rong/mixinbooter/IEarlyMixinLoader`.
 
@@ -54,6 +60,7 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 /afterimage far off|on      disable the far zone (frees all copies) / enable it again
 /afterimage fog [blocks]    show / set where fog ends while the far zone is shown (0 = vanilla fog)
 /afterimage disk            disk cache status
+/afterimage sync            server sync status
 /afterimage disk off|on     stop / resume writing and restoring the cache
 /afterimage disk clear      delete the cache of the current server and dimension
 /afterimage csv             write per-section geometry sizes to afterimage/sections.csv
@@ -81,7 +88,8 @@ Everything lives in `minecraft/afterimage/`:
 
 | Path | Content |
 |---|---|
-| `cache/<server>/DIM<n>/r.<rx>.<rz>/<cx>.<sy>.<cz>.L<layer>.aimg` | cached section geometry |
+| `cache/<server>/[<world id>/]DIM<n>/r.<rx>.<rz>/<cx>.<sy>.<cz>.L<layer>.aimg` | cached section geometry (world id when the server has Afterimage) |
+| `cache/<server>/<world id>/DIM<n>/sync.txt` | last server tick whose changes this cache has applied |
 | `summary.log` | one status line per minute |
 | `verify.log`, `mismatch/` | verifier results and dumps of any mismatch |
 | `sections.csv`, `samples/` | measurements for the tools below |
@@ -91,7 +99,8 @@ Everything lives in `minecraft/afterimage/`:
 
 - Tile entity special renderers and entities draw themselves outside chunk geometry (signs, chests, banners, beds,
   Immersive Railroading tracks and trains, LittleTiles animated structures, vehicles), so they are not in the far zone.
-- Edits made by other players while you are far away stay out of date in your cache until you come near them.
+- Without Afterimage on the server, edits made by other players while you are far away stay out of date in your cache
+  until you come near them. With it, changed chunks are dropped from the cache and show again once you come near.
 - Shader packs and OptiFine Render Regions are not supported.
 
 ## Building
@@ -105,6 +114,9 @@ libs/forge-1.12.2-srg.jar          Forge 1.12.2 srgBin jar (Minecraft + Forge, S
 libs/forge-1.12.2-universal.jar    Forge 1.12.2-14.23.5.x universal jar
 libs/forge-1.12.2-dev.jar          Forge 1.12.2 dev jar (MCP names), used only for the @Mod class
 libs/lwjgl-2.9.4.jar               LWJGL 2.9.4-nightly-20150209
+libs/netty-all-4.1.9.Final.jar    Netty 4.1.9 (Minecraft 1.12.2 library)
+libs/fastutil-7.1.0.jar           fastutil 7.1.0 (Minecraft 1.12.2 library)
+libs/guava-21.0.jar              Guava 21.0 (Minecraft 1.12.2 library)
 ```
 
 then

@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
@@ -20,6 +22,7 @@ import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.init.MobEffects;
 import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.Chunk;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
@@ -54,6 +57,8 @@ public final class Far {
      * Chisels & Bits) are applied, so an immediate handover made buildings vanish and come back while chunks loaded.
      */
     private static final long SETTLE_NANOS = Long.getLong("afterimage.settleMs", 3000L) * 1_000_000L;
+    /** Server change ticks are compared with client geometry ticks with this slack (the client clock follows the server). */
+    public static final long SYNC_TOLERANCE_TICKS = 100;
     private static final int LAYERS = 4;
     /** SOLID, CUTOUT_MIPPED, CUTOUT. Layer 3 (TRANSLUCENT) is drawn in its own sorted, blended pass. */
     private static final int OPAQUE_LAYERS = 3;
@@ -79,6 +84,8 @@ public final class Far {
         boolean handedOver;
         /** Vanilla shows this section in the current frame (compiled, chunk loaded). */
         boolean vanillaNow;
+        /** Client world tick at which this geometry was last confirmed by vanilla or written to disk; 0 = unknown. */
+        long geomTime;
         long bytes;
         double dist2;
 
@@ -107,6 +114,11 @@ public final class Far {
     private static long bytes;
     private static long captures;
     private static long reused;
+    private static long invalidated;
+    /** section key -> client world tick of vanilla's last upload for that section */
+    private static final Long2LongOpenHashMap GEOM = new Long2LongOpenHashMap();
+    /** chunk key -> latest server tick at which the server reported a change of that chunk */
+    private static final Long2LongOpenHashMap CHANGES = new Long2LongOpenHashMap();
     private static long settling;
     private static long drops;
     private static long evictions;
@@ -170,12 +182,15 @@ public final class Far {
     }
 
     /** Main thread, from Capture.onUpload: a section layer (0..2) got geometry with this fingerprint. */
-    public static void onUpload(long key, int layer, long ms) {
+    public static void onUpload(long key, int layer, long ms, long worldTime) {
+        GEOM.put(key, worldTime);
         Entry e = ENTRIES.get(key);
         if (e != null) {
             e.vanillaHash[layer] = ms;
             if (e.hash[layer] != ms) {
                 e.stale = true;
+            } else if (!e.stale) {
+                e.geomTime = Math.max(e.geomTime, worldTime);
             }
         }
     }
@@ -274,6 +289,7 @@ public final class Far {
         System.arraycopy(counts, 0, e.counts, 0, LAYERS);
         System.arraycopy(hashes, 0, e.hash, 0, LAYERS);
         e.stale = unknown;
+        e.geomTime = GEOM.get(key);
         e.bytes = total;
         ENTRIES.put(key, e);
         bytes += total;
@@ -620,7 +636,7 @@ public final class Far {
     }
 
     /** Main thread: upload one layer read from disk into a new GPU buffer. */
-    public static void uploadLayer(long key, int x, int y, int z, int layer, java.nio.ByteBuffer data) {
+    public static void uploadLayer(long key, int x, int y, int z, int layer, java.nio.ByteBuffer data, long geomTime) {
         int size = data.remaining();
         if (size < VS * 4 || bytes + size > BUDGET) {
             return;
@@ -632,7 +648,10 @@ public final class Far {
         Entry e = ENTRIES.get(key);
         if (e == null) {
             e = new Entry(key, x, y, z);
+            e.geomTime = geomTime;
             ENTRIES.put(key, e);
+        } else {
+            e.geomTime = Math.min(e.geomTime, geomTime);
         }
         e.ids[layer] = id;
         e.counts[layer] = size / VS;
@@ -643,6 +662,61 @@ public final class Far {
         e.bytes += size;
         bytes += size;
         diskUploads++;
+    }
+
+    // ================= server change sync =================
+
+    private static boolean chunkLoaded(int cx, int cz) {
+        WorldClient w = Minecraft.func_71410_x().field_71441_e;
+        if (w == null) {
+            return false;
+        }
+        Chunk c = w.func_72863_F().func_186026_b(cx, cz);
+        return c != null && !c.func_76621_g();
+    }
+
+    /** Latest server change tick known for the chunk of that section, 0 if none. */
+    public static long changeTime(long sectionKey) {
+        BlockPos p = BlockPos.func_177969_a(sectionKey);
+        return CHANGES.get(ChunkPos.func_77272_a(p.func_177958_n() >> 4, p.func_177952_p() >> 4));
+    }
+
+    /** True when the server reported a change of that section's chunk after the given geometry tick. */
+    public static boolean outdated(long sectionKey, long geomTime) {
+        long t = changeTime(sectionKey);
+        return t != 0L && t > geomTime + SYNC_TOLERANCE_TICKS;
+    }
+
+    /** Copy of the known change ticks, for the disk loader thread. */
+    public static Long2LongOpenHashMap changesSnapshot() {
+        return new Long2LongOpenHashMap(CHANGES);
+    }
+
+    /** Client thread: the server says chunk (cx, cz) changed at server tick t. */
+    public static void invalidateChunk(int cx, int cz, long t) {
+        long ck = ChunkPos.func_77272_a(cx, cz);
+        if (CHANGES.get(ck) < t) {
+            CHANGES.put(ck, t);
+        }
+        if (ENTRIES.isEmpty()) {
+            return;
+        }
+        boolean loaded = chunkLoaded(cx, cz);
+        for (int sy = 0; sy < 16; sy++) {
+            long key = new BlockPos(cx << 4, sy << 4, cz << 4).func_177986_g();
+            Entry e = ENTRIES.get(key);
+            if (e == null || e.geomTime + SYNC_TOLERANCE_TICKS >= t) {
+                continue;
+            }
+            if (loaded) {
+                // vanilla has the chunk as it is now; the copy is replaced when the section leaves
+                e.stale = true;
+            } else {
+                ENTRIES.remove(key);
+                free(e);
+                invalidated++;
+            }
+        }
     }
 
     // ================= fog =================
@@ -678,11 +752,13 @@ public final class Far {
         }
         ENTRIES.clear();
         bytes = 0;
+        GEOM.clear();
+        CHANGES.clear();
     }
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", fog " + fogEnd
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", fog " + fogEnd + ", invalidated by server " + invalidated
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }

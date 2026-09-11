@@ -8,7 +8,7 @@ VERSION=$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' src/mod/java/ru/arthaix/afte
 SEP=":"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) SEP=";" ;; esac
 
-for jar in mixinbooter-10.7.jar forge-1.12.2-srg.jar forge-1.12.2-universal.jar forge-1.12.2-dev.jar lwjgl-2.9.4.jar; do
+for jar in mixinbooter-10.7.jar forge-1.12.2-srg.jar forge-1.12.2-universal.jar forge-1.12.2-dev.jar lwjgl-2.9.4.jar netty-all-4.1.9.Final.jar fastutil-7.1.0.jar guava-21.0.jar; do
     [ -f "libs/$jar" ] || { echo "missing libs/$jar (see README, Building)"; exit 1; }
 done
 
@@ -16,14 +16,15 @@ CLASSES=build/classes
 rm -rf build
 mkdir -p "$CLASSES"
 
-# pass 1: everything that touches Minecraft, compiled against the SRG-named jar
+# pass 1: everything that touches Minecraft, compiled against the SRG-named jar. The dev jar comes after it only to
+# supply Forge classes (events, networking) with readable Minecraft class names; Minecraft members resolve from the SRG jar.
 "$JDK/bin/javac" -proc:none -source 8 -target 8 -encoding UTF-8 -nowarn \
-    -cp "libs/mixinbooter-10.7.jar${SEP}libs/forge-1.12.2-srg.jar${SEP}libs/forge-1.12.2-universal.jar${SEP}libs/lwjgl-2.9.4.jar" \
+    -cp "libs/mixinbooter-10.7.jar${SEP}libs/forge-1.12.2-srg.jar${SEP}libs/forge-1.12.2-dev.jar${SEP}libs/forge-1.12.2-universal.jar${SEP}libs/lwjgl-2.9.4.jar${SEP}libs/netty-all-4.1.9.Final.jar${SEP}libs/fastutil-7.1.0.jar${SEP}libs/guava-21.0.jar" \
     -d "$CLASSES" $(find src/main/java -name '*.java')
 
 # pass 2: the @Mod class, which only uses Forge's own API, compiled against the dev jar
 "$JDK/bin/javac" -proc:none -source 8 -target 8 -encoding UTF-8 -nowarn \
-    -cp "${CLASSES}${SEP}libs/forge-1.12.2-dev.jar" \
+    -cp "${CLASSES}${SEP}libs/forge-1.12.2-dev.jar${SEP}libs/netty-all-4.1.9.Final.jar${SEP}libs/fastutil-7.1.0.jar${SEP}libs/guava-21.0.jar" \
     -d "$CLASSES" $(find src/mod/java -name '*.java')
 
 cp src/main/resources/mixins.afterimage.json "$CLASSES/"

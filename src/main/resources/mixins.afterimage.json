@@ -5,7 +5,7 @@
   "required": false,
   "setSourceFile": true,
   "injectors": { "defaultRequire": 0 },
-  "mixins": [ ],
+  "mixins": [ "MixinChunkChanges", "MixinWorldChanges" ],
   "client": [ "MixinVertexBuffer", "MixinRenderChunk", "MixinRenderGlobal", "ViewFrustumAccessor" ],
   "server": [ ]
 }

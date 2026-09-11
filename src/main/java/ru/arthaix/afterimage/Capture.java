@@ -201,8 +201,10 @@ public final class Capture {
                 sample(vb, buf, key, layer, size, vs, now);
             }
             if (layer < 4 && vs == 28) {
-                Far.onUpload(key, layer, h[1]);
-                Disk.onSectionUpload(key, layer, buf, size, h[0], h[1]);
+                net.minecraft.client.multiplayer.WorldClient cw = Minecraft.func_71410_x().field_71441_e;
+                long wt = cw == null ? 0L : cw.func_82737_E();
+                Far.onUpload(key, layer, h[1], wt);
+                Disk.onSectionUpload(key, layer, buf, size, h[0], h[1], wt);
             }
             Rec r = SECTIONS.get(key);
             if (r == null) {
@@ -243,9 +245,11 @@ public final class Capture {
             Minecraft mcw = Minecraft.func_71410_x();
             if (mcw.field_71441_e != lastWorld) {
                 lastWorld = mcw.field_71441_e;
+                ClientSync.onWorld();
                 Far.clearAll();
                 Disk.onWorld(mcw.field_71441_e);
             }
+            ClientSync.drain();
             Disk.tick(System.nanoTime());
         } catch (Throwable t) {
             logError("tick.world", t);
@@ -312,6 +316,8 @@ public final class Capture {
             } else if (arg.equals("disk clear")) {
                 Disk.clearWorld();
                 say("disk cache for this server and dimension is being deleted");
+            } else if (arg.equals("sync")) {
+                say(ClientSync.summary());
             } else if (arg.equals("fog") || arg.startsWith("fog ")) {
                 String v = arg.substring(3).trim();
                 if (!v.isEmpty()) {
@@ -820,6 +826,10 @@ public final class Capture {
 
     static boolean onMainThread() {
         return mainThread == null || Thread.currentThread() == mainThread;
+    }
+
+    static void logInfo(String message) {
+        appendLine("summary.log", stamp() + " " + message);
     }
 
     static void logError(String where, Throwable t) {
