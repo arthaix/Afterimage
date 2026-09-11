@@ -37,8 +37,8 @@ import ru.arthaix.afterimage.mixin.ViewFrustumAccessor;
  * the clipping planes pushed out and fog pushed out, then the depth buffer is cleared, so vanilla terrain (always
  * nearer) draws on top. A copy stays while vanilla shows the section and is only replaced when the section's
  * geometry changed in the meantime (upload fingerprints), so flying back and forth costs no copies.
- * Bytes are identical to what vanilla uploaded (verified in phase 0). SOLID, CUTOUT_MIPPED and CUTOUT only;
- * translucent stays vanilla-only in this phase.
+ * Bytes are identical to what vanilla uploaded (verified in phase 0). All four layers: SOLID, CUTOUT_MIPPED and
+ * CUTOUT first, then TRANSLUCENT back to front with blending and no depth writes, as vanilla draws it.
  */
 public final class Far {
     public static volatile boolean ENABLED = !"false".equals(System.getProperty("afterimage.far"));
@@ -54,7 +54,10 @@ public final class Far {
      * Chisels & Bits) are applied, so an immediate handover made buildings vanish and come back while chunks loaded.
      */
     private static final long SETTLE_NANOS = Long.getLong("afterimage.settleMs", 3000L) * 1_000_000L;
-    private static final int LAYERS = 3;
+    private static final int LAYERS = 4;
+    /** SOLID, CUTOUT_MIPPED, CUTOUT. Layer 3 (TRANSLUCENT) is drawn in its own sorted, blended pass. */
+    private static final int OPAQUE_LAYERS = 3;
+    private static final int TRANSLUCENT = 3;
     private static final int VS = 28;
 
     private static final class Entry {
@@ -74,6 +77,8 @@ public final class Far {
         long vanillaChanged;
         /** Vanilla has taken over this section; stays set until the section leaves vanilla again. */
         boolean handedOver;
+        /** Vanilla shows this section in the current frame (compiled, chunk loaded). */
+        boolean vanillaNow;
         long bytes;
         double dist2;
 
@@ -91,6 +96,7 @@ public final class Far {
 
     private static final HashMap<Long, Entry> ENTRIES = new HashMap<Long, Entry>(8192);
     private static final ArrayList<Entry> VISIBLE = new ArrayList<Entry>(8192);
+    private static final ArrayList<Entry> VISIBLE_T = new ArrayList<Entry>(2048);
     private static final FloatBuffer MAT = BufferUtils.createFloatBuffer(16);
     private static final float[] PROJ = new float[16];
     private static final float[] MV = new float[16];
@@ -106,6 +112,7 @@ public final class Far {
     private static long evictions;
     private static long errors;
     private static int lastDrawn;
+    private static int lastDrawnTranslucent;
     private static int lastSkippedVanilla;
     private static int lastCulled;
     private static double camX;
@@ -381,11 +388,13 @@ public final class Far {
                 culled++;
                 continue;
             }
+            en.vanillaNow = false;
             if (vf != null) {
                 probe.func_181079_c(en.x, en.y, en.z);
                 RenderChunk rc = vf.afterimage$getRenderChunk(probe);
-                if (rc != null && rc.func_178568_j().func_177986_g() == en.key
-                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe) && settled(en, now)) {
+                en.vanillaNow = rc != null && rc.func_178568_j().func_177986_g() == en.key
+                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe);
+                if (en.vanillaNow && settled(en, now)) {
                     skippedVanilla++;
                     continue;
                 }
@@ -401,6 +410,7 @@ public final class Far {
 
         boolean fog = fogEnd <= 0 && GL11.glIsEnabled(GL11.GL_FOG);
         boolean alpha = GL11.glIsEnabled(GL11.GL_ALPHA_TEST);
+        boolean blend = GL11.glIsEnabled(GL11.GL_BLEND);
         GlStateManager.func_179138_g(OpenGlHelper.field_77476_b);
         boolean lightmap = GL11.glIsEnabled(GL11.GL_TEXTURE_2D);
         GlStateManager.func_179138_g(OpenGlHelper.field_77478_a);
@@ -427,30 +437,45 @@ public final class Far {
         GL11.glEnableClientState(GL11.GL_TEXTURE_COORD_ARRAY);
         GL11.glEnableClientState(GL11.GL_COLOR_ARRAY);
         try {
-            for (int l = 0; l < LAYERS; l++) {
+            for (int l = 0; l < OPAQUE_LAYERS; l++) {
                 if (l == 1) {
                     GlStateManager.func_179141_d();
                 }
                 for (int i = 0, n = VISIBLE.size(); i < n; i++) {
-                    Entry en = VISIBLE.get(i);
-                    int id = en.ids[l];
-                    if (id <= 0) {
-                        continue;
+                    drawLayer(VISIBLE.get(i), l);
+                }
+            }
+            // Translucent (glass, water, ice): after every opaque copy, back to front, blended, without depth writes,
+            // with the same state vanilla sets for its own TRANSLUCENT pass.
+            VISIBLE_T.clear();
+            for (int i = 0, n = VISIBLE.size(); i < n; i++) {
+                Entry en = VISIBLE.get(i);
+                // while vanilla is taking a section over it already draws that section's translucent layer
+                if (en.ids[TRANSLUCENT] > 0 && !(en.vanillaNow && en.vanillaHash[TRANSLUCENT] != 0L)) {
+                    double dx = en.x + 8 - camX;
+                    double dy = en.y + 8 - camY;
+                    double dz = en.z + 8 - camZ;
+                    en.dist2 = dx * dx + dy * dy + dz * dz;
+                    VISIBLE_T.add(en);
+                }
+            }
+            lastDrawnTranslucent = VISIBLE_T.size();
+            if (!VISIBLE_T.isEmpty()) {
+                Collections.sort(VISIBLE_T, (a, b) -> Double.compare(b.dist2, a.dist2));
+                GlStateManager.func_179141_d();
+                GlStateManager.func_179092_a(GL11.GL_GREATER, 0.1f);
+                GlStateManager.func_179147_l();
+                GlStateManager.func_179120_a(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
+                GlStateManager.func_179132_a(false);
+                try {
+                    for (int i = 0, n = VISIBLE_T.size(); i < n; i++) {
+                        drawLayer(VISIBLE_T.get(i), TRANSLUCENT);
                     }
-                    OpenGlHelper.func_176072_g(GL15.GL_ARRAY_BUFFER, id);
-                    GL11.glVertexPointer(3, GL11.GL_FLOAT, VS, 0L);
-                    GL11.glColorPointer(4, GL11.GL_UNSIGNED_BYTE, VS, 12L);
-                    GL11.glTexCoordPointer(2, GL11.GL_FLOAT, VS, 16L);
-                    OpenGlHelper.func_77472_b(OpenGlHelper.field_77476_b);
-                    GL11.glTexCoordPointer(2, GL11.GL_SHORT, VS, 24L);
-                    OpenGlHelper.func_77472_b(OpenGlHelper.field_77478_a);
-                    GlStateManager.func_179094_E();
-                    GlStateManager.func_179109_b((float) (en.x - camX), (float) (en.y - camY), (float) (en.z - camZ));
-                    GlStateManager.func_179109_b(-8.0f, -8.0f, -8.0f);
-                    GlStateManager.func_179152_a(1.000001f, 1.000001f, 1.000001f);
-                    GlStateManager.func_179109_b(8.0f, 8.0f, 8.0f);
-                    GL11.glDrawArrays(GL11.GL_QUADS, 0, en.counts[l]);
-                    GlStateManager.func_179121_F();
+                } finally {
+                    GlStateManager.func_179132_a(true);
+                    if (!blend) {
+                        GlStateManager.func_179084_k();
+                    }
                 }
             }
         } finally {
@@ -477,6 +502,28 @@ public final class Far {
             GlStateManager.func_179128_n(GL11.GL_MODELVIEW);
             GlStateManager.func_179086_m(GL11.GL_DEPTH_BUFFER_BIT);
         }
+    }
+
+    /** One layer of one copy, with the vertex layout and RenderChunk transform VboRenderList uses. */
+    private static void drawLayer(Entry en, int l) {
+        int id = en.ids[l];
+        if (id <= 0) {
+            return;
+        }
+        OpenGlHelper.func_176072_g(GL15.GL_ARRAY_BUFFER, id);
+        GL11.glVertexPointer(3, GL11.GL_FLOAT, VS, 0L);
+        GL11.glColorPointer(4, GL11.GL_UNSIGNED_BYTE, VS, 12L);
+        GL11.glTexCoordPointer(2, GL11.GL_FLOAT, VS, 16L);
+        OpenGlHelper.func_77472_b(OpenGlHelper.field_77476_b);
+        GL11.glTexCoordPointer(2, GL11.GL_SHORT, VS, 24L);
+        OpenGlHelper.func_77472_b(OpenGlHelper.field_77478_a);
+        GlStateManager.func_179094_E();
+        GlStateManager.func_179109_b((float) (en.x - camX), (float) (en.y - camY), (float) (en.z - camZ));
+        GlStateManager.func_179109_b(-8.0f, -8.0f, -8.0f);
+        GlStateManager.func_179152_a(1.000001f, 1.000001f, 1.000001f);
+        GlStateManager.func_179109_b(8.0f, 8.0f, 8.0f);
+        GL11.glDrawArrays(GL11.GL_QUADS, 0, en.counts[l]);
+        GlStateManager.func_179121_F();
     }
 
     /** True once vanilla may draw the section alone: same geometry as the copy, or no vanilla change for SETTLE_NANOS. */
@@ -636,7 +683,7 @@ public final class Far {
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
             + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", fog " + fogEnd
-            + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn
+            + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }
 

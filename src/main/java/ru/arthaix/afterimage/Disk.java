@@ -271,7 +271,7 @@ public final class Disk {
         }
         BlockRenderLayer[] layers = BlockRenderLayer.values();
         long due = System.nanoTime() + DELETE_GRACE;
-        for (int l = 0; l < 3; l++) {
+        for (int l = 0; l < 4; l++) {
             long sk = key * 4 + l;
             if (next.func_178491_b(layers[l]) && ONDISK.containsKey(sk)) {
                 PENDING_DELETE.put(sk, due);
@@ -445,6 +445,11 @@ public final class Disk {
                 }
                 ByteBuffer data = readBody(m);
                 if (data == null) {
+                    // the writer may be replacing this very file (Windows refuses to open a file mid-move): retry once
+                    Thread.sleep(100);
+                    data = readBody(m);
+                }
+                if (data == null) {
                     continue;
                 }
                 READY.add(new Loaded(m.key, m.layer, m.x, m.y, m.z, data, gen));
@@ -458,6 +463,15 @@ public final class Disk {
             ERRORS.incrementAndGet();
             status = "load error";
             Capture.logError("disk.load", t);
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger READ_ERRORS_LOGGED = new java.util.concurrent.atomic.AtomicInteger();
+
+    private static void readError(String what, File f, Throwable t) {
+        ERRORS.incrementAndGet();
+        if (READ_ERRORS_LOGGED.incrementAndGet() <= 20) {
+            Capture.logError("disk." + what + " " + f, t != null ? t : new IllegalStateException("bad data"));
         }
     }
 
@@ -475,12 +489,12 @@ public final class Disk {
             in.readLong();
             in.readLong();
             int comp = in.readInt();
-            if (vs != VS || layer < 0 || layer > 2 || raw <= 0 || raw % (VS * 4) != 0 || comp <= 0) {
+            if (vs != VS || layer < 0 || layer > 3 || raw <= 0 || raw % (VS * 4) != 0 || comp <= 0) {
                 return null;
             }
             return new Meta(f, new BlockPos(x, y, z).func_177986_g(), layer, x, y, z, raw, comp);
         } catch (Throwable t) {
-            ERRORS.incrementAndGet();
+            readError("header", f, t);
             return null;
         }
     }
@@ -512,7 +526,7 @@ public final class Disk {
                     off += n;
                 }
                 if (off != raw.length) {
-                    ERRORS.incrementAndGet();
+                    readError("inflate " + off + "/" + raw.length, m.file, null);
                     return null;
                 }
             } finally {
@@ -523,7 +537,7 @@ public final class Disk {
             bb.flip();
             return bb;
         } catch (Throwable t) {
-            ERRORS.incrementAndGet();
+            readError("body", m.file, t);
             return null;
         }
     }

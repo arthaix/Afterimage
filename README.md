@@ -13,6 +13,8 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
 - **Exact, not LOD**: the far zone draws the very bytes the game uploaded for each section. No downsampling, no
   simplified buildings. Rebuild determinism and capture correctness were proven in game by a built-in verifier
   (`-Dafterimage.verify=true`).
+- **All block layers**: solid, cutout and translucent (glass, stained glass, water, ice). Translucent copies are drawn
+  after the opaque ones, back to front and blended, the way vanilla draws its translucent layer.
 - **Copied on the GPU**: section geometry is duplicated with `glCopyBufferSubData` at the moment vanilla would lose it,
   with no readback to the CPU and no GL queries that would stall on the driver.
 - **Persistent**: sections are written to a per-server, per-dimension cache in the background (deflate, atomic writes,
@@ -87,7 +89,8 @@ Everything lives in `minecraft/afterimage/`:
 
 ## Limitations
 
-- Translucent blocks (glass, water) are not part of the far zone yet.
+- Tile entity special renderers and entities draw themselves outside chunk geometry (signs, chests, banners, beds,
+  Immersive Railroading tracks and trains, LittleTiles animated structures, vehicles), so they are not in the far zone.
 - Edits made by other players while you are far away stay out of date in your cache until you come near them.
 - Shader packs and OptiFine Render Regions are not supported.
 

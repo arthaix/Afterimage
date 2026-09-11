@@ -200,7 +200,7 @@ public final class Capture {
             if (VERIFY) {
                 sample(vb, buf, key, layer, size, vs, now);
             }
-            if (layer < 3 && vs == 28) {
+            if (layer < 4 && vs == 28) {
                 Far.onUpload(key, layer, h[1]);
                 Disk.onSectionUpload(key, layer, buf, size, h[0], h[1]);
             }
