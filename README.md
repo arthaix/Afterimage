@@ -18,6 +18,8 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
 - **Persistent**: sections are written to a per-server, per-dimension cache in the background (deflate, atomic writes,
   newer versions supersede queued older ones). On join the cache is restored nearest-first, uploaded to the GPU for at
   most 4 ms per frame.
+- **No popping while chunks load**: vanilla compiles a section before its LittleTiles / Chisels & Bits tile entities
+  arrive, so the copy stays underneath until vanilla's geometry matches it or has been quiet for 3 s.
 - **Never fights vanilla**: a section vanilla shows itself always wins. Its copy stays in VRAM and is replaced only if
   the section's geometry changed (upload fingerprints), so flying back and forth costs no copies; the disk cache is
   refreshed from every new build.
@@ -65,6 +67,7 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 | `-Dafterimage.farPlane` | 8192 | far clipping plane used for the far zone, in blocks |
 | `-Dafterimage.farNear` | 6 | near clipping plane of the far pass, in blocks (depth precision far away) |
 | `-Dafterimage.fogEnd` | 2048 | fog end while the far zone has content, in blocks; 0 keeps vanilla fog |
+| `-Dafterimage.settleMs` | 3000 | a copy stays under a freshly loaded vanilla section until they match or vanilla is quiet this long |
 | `-Dafterimage.disk` | true | disk cache on or off |
 | `-Dafterimage.diskUploadMs` | 4 | per-frame time budget for uploading restored sections |
 | `-Dafterimage.enabled` | true | upload tracking and measurements (far-zone reuse and the disk cache rely on it) |

@@ -48,6 +48,12 @@ public final class Far {
     private static final double FAR_NEAR = Double.parseDouble(System.getProperty("afterimage.farNear", "6"));
     /** Normal air fog is pushed out to this distance while the far zone has content; 0 keeps vanilla fog. */
     public static volatile int fogEnd = Integer.getInteger("afterimage.fogEnd", 2048);
+    /**
+     * A copy keeps being drawn under a freshly compiled vanilla section until the two match or vanilla has not changed the
+     * section for this long. Vanilla compiles a section as soon as the chunk arrives, before its tile entities (LittleTiles,
+     * Chisels & Bits) are applied, so an immediate handover made buildings vanish and come back while chunks loaded.
+     */
+    private static final long SETTLE_NANOS = Long.getLong("afterimage.settleMs", 3000L) * 1_000_000L;
     private static final int LAYERS = 3;
     private static final int VS = 28;
 
@@ -62,6 +68,12 @@ public final class Far {
         final long[] hash = new long[LAYERS];
         /** Set when the section got different geometry after the copy was made. */
         boolean stale;
+        /** Fingerprint per layer of what vanilla currently has for this section, 0 = empty or not seen. */
+        final long[] vanillaHash = new long[LAYERS];
+        /** System.nanoTime() of vanilla's last compile of this section, 0 = none seen while the copy existed. */
+        long vanillaChanged;
+        /** Vanilla has taken over this section; stays set until the section leaves vanilla again. */
+        boolean handedOver;
         long bytes;
         double dist2;
 
@@ -89,6 +101,7 @@ public final class Far {
     private static long bytes;
     private static long captures;
     private static long reused;
+    private static long settling;
     private static long drops;
     private static long evictions;
     private static long errors;
@@ -130,10 +143,14 @@ public final class Far {
                     if (e != null) {
                         BlockRenderLayer[] layers = BlockRenderLayer.values();
                         for (int l = 0; l < LAYERS; l++) {
-                            if (e.ids[l] > 0 && next.func_178491_b(layers[l])) {
-                                e.stale = true;
+                            if (next.func_178491_b(layers[l])) {
+                                e.vanillaHash[l] = 0L;
+                                if (e.ids[l] > 0) {
+                                    e.stale = true;
+                                }
                             }
                         }
+                        e.vanillaChanged = System.nanoTime();
                     }
                     Disk.onVanillaCompiled(key, next);
                 }
@@ -148,8 +165,11 @@ public final class Far {
     /** Main thread, from Capture.onUpload: a section layer (0..2) got geometry with this fingerprint. */
     public static void onUpload(long key, int layer, long ms) {
         Entry e = ENTRIES.get(key);
-        if (e != null && e.hash[layer] != ms) {
-            e.stale = true;
+        if (e != null) {
+            e.vanillaHash[layer] = ms;
+            if (e.hash[layer] != ms) {
+                e.stale = true;
+            }
         }
     }
 
@@ -183,6 +203,8 @@ public final class Far {
         boolean tracked = Capture.ENABLED;
         if (old != null && !old.stale && tracked) {
             // The copy already holds exactly this geometry: any later upload would have marked it stale.
+            old.handedOver = false;
+            old.vanillaChanged = 0L;
             reused++;
             return;
         }
@@ -350,6 +372,7 @@ public final class Far {
         int culled = 0;
         ViewFrustumAccessor vf = frustum == null ? null : (ViewFrustumAccessor) (Object) frustum;
         BlockPos.MutableBlockPos probe = new BlockPos.MutableBlockPos();
+        long now = System.nanoTime();
         for (Entry en : ENTRIES.values()) {
             float minX = (float) (en.x - camX);
             float minY = (float) (en.y - camY);
@@ -362,7 +385,7 @@ public final class Far {
                 probe.func_181079_c(en.x, en.y, en.z);
                 RenderChunk rc = vf.afterimage$getRenderChunk(probe);
                 if (rc != null && rc.func_178568_j().func_177986_g() == en.key
-                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe)) {
+                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe) && settled(en, now)) {
                     skippedVanilla++;
                     continue;
                 }
@@ -454,6 +477,26 @@ public final class Far {
             GlStateManager.func_179128_n(GL11.GL_MODELVIEW);
             GlStateManager.func_179086_m(GL11.GL_DEPTH_BUFFER_BIT);
         }
+    }
+
+    /** True once vanilla may draw the section alone: same geometry as the copy, or no vanilla change for SETTLE_NANOS. */
+    private static boolean settled(Entry e, long now) {
+        if (e.handedOver) {
+            return true;
+        }
+        boolean same = true;
+        for (int l = 0; l < LAYERS; l++) {
+            if (e.hash[l] != e.vanillaHash[l]) {
+                same = false;
+                break;
+            }
+        }
+        if (same || e.vanillaChanged == 0L || now - e.vanillaChanged > SETTLE_NANOS) {
+            e.handedOver = true;
+            return true;
+        }
+        settling++;
+        return false;
     }
 
     /** Column-major 4x4: out = a * b. */
@@ -592,7 +635,7 @@ public final class Far {
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", fog " + fogEnd
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", fog " + fogEnd
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }

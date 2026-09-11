@@ -17,7 +17,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
      dependencies = "required-after:mixinbooter@[10.0,)", acceptableRemoteVersions = "*", clientSideOnly = true)
 public class Afterimage {
     public static final String MODID = "afterimage";
-    public static final String VERSION = "0.3.1";
+    public static final String VERSION = "0.3.2";
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
