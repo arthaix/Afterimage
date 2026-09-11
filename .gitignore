@@ -1,0 +1,23 @@
+# build
+build/
+out/
+bin/
+*.class
+
+# build dependencies (see README "Building")
+libs/
+
+# IDE
+.idea/
+*.iml
+.settings/
+.classpath
+.project
+.vscode/
+
+# tools
+__pycache__/
+
+# OS
+Thumbs.db
+.DS_Store

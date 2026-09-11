@@ -1,0 +1,11 @@
+{
+  "package": "ru.arthaix.afterimage.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": false,
+  "setSourceFile": true,
+  "injectors": { "defaultRequire": 0 },
+  "mixins": [ ],
+  "client": [ "MixinVertexBuffer", "MixinRenderChunk", "MixinRenderGlobal", "ViewFrustumAccessor" ],
+  "server": [ ]
+}

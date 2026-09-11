@@ -1,0 +1,16 @@
+[
+{
+  "modid": "afterimage",
+  "name": "Afterimage",
+  "description": "Keeps the city on screen: chunk sections that vanilla drops are kept as exact GPU copies, drawn beyond the render distance and cached on disk, so everything you have seen is back right after rejoining. Built for Chisels & Bits and LittleTiles cities.",
+  "version": "${version}",
+  "mcversion": "1.12.2",
+  "url": "https://github.com/arthaix/Afterimage",
+  "updateUrl": "",
+  "authorList": ["Aleksei Usenko (arthaix)"],
+  "credits": "Requires MixinBooter by Rongmario.",
+  "logoFile": "",
+  "screenshots": [],
+  "dependencies": ["mixinbooter"]
+}
+]

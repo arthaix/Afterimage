@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+FMLCorePlugin: ru.arthaix.afterimage.AfterimageCore
+FMLCorePluginContainsFMLMod: true
+ForceLoadAsMod: true
+
