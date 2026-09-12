@@ -16,5 +16,8 @@ public interface IAfterimageVbo {
 
     int afterimage$glId();
 
+    /** Only for a buffer whose contents vanilla will never draw again (Far takes the old one). */
+    void afterimage$setGlId(int id);
+
     int afterimage$vertexSize();
 }

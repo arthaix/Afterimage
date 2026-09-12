@@ -66,6 +66,60 @@ public final class Far {
     private static final int OPAQUE_LAYERS = 3;
     private static final int TRANSLUCENT = 3;
     private static final int VS = 28;
+    /** Keep a leaving section's own GL buffer as its copy instead of copying it on the GPU (-Dafterimage.steal=false copies). */
+    private static final boolean STEAL = !"false".equals(System.getProperty("afterimage.steal"));
+    /** Copies loaded from disk never change: immutable GL storage without CPU access where the driver has it. */
+    private static final boolean IMMUTABLE = !"false".equals(System.getProperty("afterimage.immutable"));
+    private static Boolean storage;
+    private static final long MIN_BUDGET = Long.getLong("afterimage.farMinBudgetMB", 1024L) << 20;
+    /** Below this much available RAM the far zone gives copies back; above HIGH_FREE it grows back toward BUDGET. */
+    private static final long LOW_FREE = Long.getLong("afterimage.lowFreeMB", 4096L) << 20;
+    private static final long HIGH_FREE = Long.getLong("afterimage.highFreeMB", 10240L) << 20;
+    private static long budgetNow = BUDGET;
+    private static long lastMemoryCheck;
+    private static long budgetLowered;
+    private static java.lang.management.OperatingSystemMXBean os;
+
+    private static boolean storage() {
+        if (storage == null) {
+            org.lwjgl.opengl.ContextCapabilities c = GLContext.getCapabilities();
+            storage = IMMUTABLE && (c.OpenGL44 || c.GL_ARB_buffer_storage);
+        }
+        return storage;
+    }
+
+    /**
+     * Client tick. Each GB of far copies also holds RAM in the graphics driver, and a machine short of RAM stalls in the
+     * page file (client and server alike), so when available RAM drops below LOW_FREE the budget shrinks by the shortfall
+     * (never below MIN_BUDGET) and the farthest copies go; with more than HIGH_FREE available it grows back 256 MB per check.
+     */
+    public static void checkMemory(long now) {
+        if (now - lastMemoryCheck < 2_000_000_000L) {
+            return;
+        }
+        lastMemoryCheck = now;
+        long free;
+        try {
+            if (os == null) {
+                os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+            }
+            free = ((com.sun.management.OperatingSystemMXBean) os).getFreePhysicalMemorySize();
+        } catch (Throwable t) {
+            return;
+        }
+        if (free < LOW_FREE) {
+            long target = Math.max(MIN_BUDGET, Math.min(budgetNow, bytes) - (LOW_FREE - free));
+            if (target < budgetNow) {
+                budgetNow = target;
+                budgetLowered++;
+                if (bytes > budgetNow) {
+                    evict();
+                }
+            }
+        } else if (free > HIGH_FREE && budgetNow < BUDGET) {
+            budgetNow = Math.min(BUDGET, budgetNow + (256L << 20));
+        }
+    }
 
     private static final class Entry {
         final long key;
@@ -106,6 +160,11 @@ public final class Far {
     }
 
     private static final HashMap<Long, Entry> ENTRIES = new HashMap<Long, Entry>(8192);
+    /** Stale copies of sections vanilla shows, recaptured after the render loop (at most REFRESH_PER_FRAME per frame). */
+    private static final ArrayList<RenderChunk> REFRESH = new ArrayList<RenderChunk>(16);
+    private static final int REFRESH_PER_FRAME = 8;
+    private static final long REFRESH_QUIET_NANOS = Long.getLong("afterimage.refreshQuietMs", 1500L) * 1_000_000L;
+    private static long refreshed;
     private static final ArrayList<Entry> VISIBLE = new ArrayList<Entry>(8192);
     private static final ArrayList<Entry> VISIBLE_T = new ArrayList<Entry>(2048);
     private static final FloatBuffer MAT = BufferUtils.createFloatBuffer(16);
@@ -117,6 +176,7 @@ public final class Far {
     private static Boolean supported;
     private static long bytes;
     private static long captures;
+    private static long stolen;
     private static long reused;
     private static long invalidated;
     /** section key -> client world tick of vanilla's last upload for that section */
@@ -149,7 +209,7 @@ public final class Far {
             return;
         }
         try {
-            capture(rc);
+            capture(rc, true);
         } catch (Throwable t) {
             fail("onLeave", t);
         }
@@ -203,6 +263,31 @@ public final class Far {
         }
     }
 
+    private static boolean regionsChecked;
+    private static boolean regionsAbsent;
+    private static boolean regions;
+    private static int regionsCheckFrame;
+
+    /** OptiFine's render regions draw sections from shared region buffers: a VertexBuffer's own buffer must stay put then. */
+    private static boolean renderRegions() {
+        if (regionsAbsent) {
+            return false;
+        }
+        if (!regionsChecked || frame - regionsCheckFrame > 600 || frame < regionsCheckFrame) {
+            regionsChecked = true;
+            regionsCheckFrame = frame;
+            try {
+                regions = Boolean.TRUE.equals(Class.forName("Config").getMethod("isRenderRegions").invoke(null));
+            } catch (ClassNotFoundException e) {
+                regionsAbsent = true;
+                regions = false;
+            } catch (Throwable t) {
+                regions = true;
+            }
+        }
+        return regions;
+    }
+
     private static boolean supported() {
         if (supported == null) {
             supported = GLContext.getCapabilities().OpenGL31;
@@ -238,6 +323,11 @@ public final class Far {
     }
 
     private static void capture(RenderChunk rc) {
+        capture(rc, false);
+    }
+
+    /** leaving: the RenderChunk moves to another position or deletes its buffers, so vanilla never draws their bytes again. */
+    private static void capture(RenderChunk rc, boolean leaving) {
         if (!supported()) {
             return;
         }
@@ -276,25 +366,42 @@ public final class Far {
             if (src <= 0 || v.afterimage$vertexSize() != VS) {
                 continue;
             }
-            GL15.glBindBuffer(GL31.GL_COPY_READ_BUFFER, src);
             int size;
-            if (tracked) {
-                // size of the last upload, recorded by the upload hook; glGetBufferParameter would stall the CPU on the driver
+            if (tracked && leaving && STEAL && !renderRegions()) {
+                // Vanilla never draws these bytes again: keep the buffer itself as the copy and give the VertexBuffer a new,
+                // empty one. No allocation or copy in the driver, which stalled flights at every chunk border.
                 size = v.afterimage$lastSize();
+                if (size < VS * 4 || size % VS != 0) {
+                    continue;
+                }
+                int fresh = GL15.glGenBuffers();
+                if (fresh <= 0) {
+                    continue;
+                }
+                v.afterimage$setGlId(fresh);
+                Capture.onStolen(vb);
+                ids[l] = src;
+                stolen++;
             } else {
-                size = GL15.glGetBufferParameteri(GL31.GL_COPY_READ_BUFFER, GL15.GL_BUFFER_SIZE);
-            }
-            if (size < VS * 4 || size % VS != 0) {
+                GL15.glBindBuffer(GL31.GL_COPY_READ_BUFFER, src);
+                if (tracked) {
+                    // size of the last upload, recorded by the upload hook; glGetBufferParameter would stall the CPU on the driver
+                    size = v.afterimage$lastSize();
+                } else {
+                    size = GL15.glGetBufferParameteri(GL31.GL_COPY_READ_BUFFER, GL15.GL_BUFFER_SIZE);
+                }
+                if (size < VS * 4 || size % VS != 0) {
+                    GL15.glBindBuffer(GL31.GL_COPY_READ_BUFFER, 0);
+                    continue;
+                }
+                int dst = GL15.glGenBuffers();
+                GL15.glBindBuffer(GL31.GL_COPY_WRITE_BUFFER, dst);
+                GL15.glBufferData(GL31.GL_COPY_WRITE_BUFFER, (long) size, GL15.GL_STATIC_DRAW);
+                GL31.glCopyBufferSubData(GL31.GL_COPY_READ_BUFFER, GL31.GL_COPY_WRITE_BUFFER, 0L, 0L, (long) size);
+                GL15.glBindBuffer(GL31.GL_COPY_WRITE_BUFFER, 0);
                 GL15.glBindBuffer(GL31.GL_COPY_READ_BUFFER, 0);
-                continue;
+                ids[l] = dst;
             }
-            int dst = GL15.glGenBuffers();
-            GL15.glBindBuffer(GL31.GL_COPY_WRITE_BUFFER, dst);
-            GL15.glBufferData(GL31.GL_COPY_WRITE_BUFFER, (long) size, GL15.GL_STATIC_DRAW);
-            GL31.glCopyBufferSubData(GL31.GL_COPY_READ_BUFFER, GL31.GL_COPY_WRITE_BUFFER, 0L, 0L, (long) size);
-            GL15.glBindBuffer(GL31.GL_COPY_WRITE_BUFFER, 0);
-            GL15.glBindBuffer(GL31.GL_COPY_READ_BUFFER, 0);
-            ids[l] = dst;
             counts[l] = size / VS;
             hashes[l] = tracked ? Capture.layerHash(key, l, size) : 0L;
             if (hashes[l] == 0L) {
@@ -320,7 +427,7 @@ public final class Far {
         ENTRIES.put(key, e);
         bytes += total;
         captures++;
-        if (bytes > BUDGET) {
+        if (bytes > budgetNow) {
             evict();
         }
     }
@@ -336,11 +443,32 @@ public final class Far {
     private static void free(Entry e) {
         for (int l = 0; l < LAYERS; l++) {
             if (e.ids[l] > 0) {
-                GL15.glDeleteBuffers(e.ids[l]);
+                TRASH.add(e.ids[l]);
                 e.ids[l] = 0;
             }
         }
         bytes -= e.bytes;
+    }
+
+    /** GL buffers of dropped copies, deleted at most DELETE_PER_TICK per client tick (a world change freed ~30k at once: 1 s). */
+    private static final it.unimi.dsi.fastutil.ints.IntArrayList TRASH = new it.unimi.dsi.fastutil.ints.IntArrayList();
+    private static final int DELETE_PER_TICK = 512;
+    private static final java.nio.IntBuffer TRASH_IDS = BufferUtils.createIntBuffer(DELETE_PER_TICK);
+
+    /** Client tick, main thread. */
+    public static void deleteTrash() {
+        int n = Math.min(DELETE_PER_TICK, TRASH.size());
+        if (n == 0) {
+            return;
+        }
+        TRASH_IDS.clear();
+        int from = TRASH.size() - n;
+        for (int i = TRASH.size() - 1; i >= from; i--) {
+            TRASH_IDS.put(TRASH.getInt(i));
+        }
+        TRASH.size(from);
+        TRASH_IDS.flip();
+        GL15.glDeleteBuffers(TRASH_IDS);
     }
 
     private static void evict() {
@@ -352,7 +480,7 @@ public final class Far {
             e.dist2 = dx * dx + dy * dy + dz * dz;
         }
         Collections.sort(all, (a, b) -> Double.compare(b.dist2, a.dist2));
-        long target = BUDGET - BUDGET / 10;
+        long target = budgetNow - budgetNow / 10;
         for (Entry e : all) {
             if (bytes <= target) {
                 break;
@@ -450,6 +578,12 @@ public final class Far {
                         skippedVanilla++;
                         continue;
                     }
+                    if (en.stale && REFRESH.size() < REFRESH_PER_FRAME && en.vanillaChanged != 0L
+                            && now - en.vanillaChanged > REFRESH_QUIET_NANOS && !rc.func_178569_m()) {
+                        // 0.5.4 recaptured such sections on every camera move (ViewFrustum repositions all RenderChunks);
+                        // 0.5.5 stopped that, and stale copies (glass of other sections among them) stayed on screen
+                        REFRESH.add(rc);
+                    }
                     double dx = en.x + 8 - camX;
                     double dy = en.y + 8 - camY;
                     double dz = en.z + 8 - camZ;
@@ -462,6 +596,13 @@ public final class Far {
                 }
             }
             VISIBLE.add(en);
+        }
+        if (!REFRESH.isEmpty()) {
+            for (int i = 0, n = REFRESH.size(); i < n; i++) {
+                capture(REFRESH.get(i), false);
+                refreshed++;
+            }
+            REFRESH.clear();
         }
         lastSkippedVanilla = skippedVanilla;
         lastHidden = hidden;
@@ -513,8 +654,9 @@ public final class Far {
             VISIBLE_T.clear();
             for (int i = 0, n = VISIBLE.size(); i < n; i++) {
                 Entry en = VISIBLE.get(i);
-                // while vanilla is taking a section over it already draws that section's translucent layer
-                if (en.ids[TRANSLUCENT] > 0 && !(en.vanillaNow && !en.hidingVanilla && en.vanillaHash[TRANSLUCENT] != 0L)) {
+                // A section vanilla shows draws its own translucent layer, or has none. A copy's glass or water over it could
+                // only be stale, and then it floats where nothing translucent is (user screenshots, 2026-09-12).
+                if (en.ids[TRANSLUCENT] > 0 && (!en.vanillaNow || en.hidingVanilla)) {
                     double dx = en.x + 8 - camX;
                     double dy = en.y + 8 - camY;
                     double dz = en.z + 8 - camZ;
@@ -661,7 +803,7 @@ public final class Far {
     private static long diskUploads;
 
     public static long budget() {
-        return BUDGET;
+        return budgetNow;
     }
 
     /** Main thread. False when a live copy of that layer exists or vanilla shows the section itself. */
@@ -681,7 +823,7 @@ public final class Far {
                 return false;
             }
         }
-        return bytes + data0Size(layer) <= BUDGET;
+        return bytes + data0Size(layer) <= budgetNow;
     }
 
     private static long data0Size(int layer) {
@@ -691,12 +833,16 @@ public final class Far {
     /** Main thread: upload one layer read from disk into a new GPU buffer. */
     public static void uploadLayer(long key, int x, int y, int z, int layer, java.nio.ByteBuffer data, long geomTime) {
         int size = data.remaining();
-        if (size < VS * 4 || bytes + size > BUDGET) {
+        if (size < VS * 4 || bytes + size > budgetNow) {
             return;
         }
         int id = GL15.glGenBuffers();
         OpenGlHelper.func_176072_g(GL15.GL_ARRAY_BUFFER, id);
-        GL15.glBufferData(GL15.GL_ARRAY_BUFFER, data, GL15.GL_STATIC_DRAW);
+        if (storage()) {
+            org.lwjgl.opengl.GL44.glBufferStorage(GL15.GL_ARRAY_BUFFER, data, 0);
+        } else {
+            GL15.glBufferData(GL15.GL_ARRAY_BUFFER, data, GL15.GL_STATIC_DRAW);
+        }
         OpenGlHelper.func_176072_g(GL15.GL_ARRAY_BUFFER, 0);
         Entry e = ENTRIES.get(key);
         if (e == null) {
@@ -811,7 +957,7 @@ public final class Far {
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (BUDGET >> 20) + " MB, captures " + captures + ", reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (budgetNow >> 20) + "/" + (BUDGET >> 20) + " MB (lowered " + budgetLowered + "x, immutable " + storage + "), captures " + captures + " (buffers taken " + stolen + ", stale refreshed " + refreshed + "), reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }

@@ -3,6 +3,7 @@ package ru.arthaix.afterimage.mixin;
 import net.minecraft.client.renderer.chunk.CompiledChunk;
 import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.client.renderer.vertex.VertexBuffer;
+import net.minecraft.util.math.BlockPos;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -40,6 +41,11 @@ public abstract class MixinRenderChunk implements IAfterimageRenderChunk {
 
     @Inject(method = "func_189562_a(III)V", at = @At("HEAD"))
     private void afterimage$moved(int x, int y, int z, CallbackInfo ci) {
+        BlockPos p = ((RenderChunk) (Object) this).func_178568_j();
+        if (p.func_177958_n() == x && p.func_177956_o() == y && p.func_177952_p() == z) {
+            // ViewFrustum repositions every RenderChunk whenever the camera moves; almost all of them stay where they are
+            return;
+        }
         Far.onLeave((RenderChunk) (Object) this);
         Disk.dropHeld((RenderChunk) (Object) this);
         this.afterimage$dirtyGen++;

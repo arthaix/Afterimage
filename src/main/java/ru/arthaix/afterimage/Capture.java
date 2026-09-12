@@ -15,11 +15,14 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.BufferBuilder;
 import net.minecraft.client.renderer.chunk.CompiledChunk;
 import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.client.renderer.vertex.VertexBuffer;
+import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.TextComponentString;
@@ -98,6 +101,16 @@ public final class Capture {
     private static long vboCreated, vboDeleted, uploads, uploadBytes, unownedUploads, offThreadUploads, hashNanos;
     private static final long[] LIVE = new long[LAYERS];
 
+    // ---- fingerprints computed on chunk workers ----
+    /** Section uploads are fingerprinted by the chunk worker that finished the buffer (-Dafterimage.workerHash=false: client thread). */
+    private static volatile boolean WORKER_HASH = !"false".equals(System.getProperty("afterimage.workerHash"));
+    /** The first 16 and then every n-th worker fingerprint are recomputed on the client thread; one difference turns it off. */
+    private static final int WORKER_CHECK_EVERY = Integer.getInteger("afterimage.workerHashCheck", 64);
+    private static final AtomicLong WORKER_HASHED = new AtomicLong();
+    private static final AtomicLong WORKER_NANOS = new AtomicLong();
+    private static BufferBuilder uploadingBuilder;
+    private static long mainHashed, workerUsed, workerStale, workerChecked, workerMismatch;
+
     // ---- verifier state ----
     private static final class Snap {
         int size;
@@ -167,6 +180,71 @@ public final class Capture {
         }
     }
 
+    /** Chunk worker, from ChunkRenderDispatcher.uploadChunk just before the upload is queued for the client thread. */
+    public static void workerHash(BlockRenderLayer layer, BufferBuilder buffer) {
+        if (!ENABLED || !WORKER_HASH || buffer == null || layer == null || layer.ordinal() >= LAYERS) {
+            return;
+        }
+        try {
+            VertexFormat format = buffer.func_178973_g();
+            ByteBuffer bytes = buffer.func_178966_f();
+            if (format == null || bytes == null || format.func_177338_f() != 28 || !bytes.hasRemaining()) {
+                return;
+            }
+            long t = System.nanoTime();
+            long[] h = Hash.of(bytes, 28);
+            WORKER_NANOS.addAndGet(System.nanoTime() - t);
+            WORKER_HASHED.incrementAndGet();
+            ((IAfterimageBufferBuilder) buffer).afterimage$setPreHash(new long[] {bytes.remaining(), h[0], h[1]});
+        } catch (Throwable t) {
+            WORKER_HASH = false;
+        }
+    }
+
+    /** Client thread: VertexBufferUploader.draw HEAD (the builder being uploaded) and RETURN (null). */
+    public static void uploading(BufferBuilder buffer) {
+        uploadingBuilder = buffer;
+    }
+
+    /** The chunk worker's fingerprint of exactly these bytes, or null when there is none or it may not match them. */
+    private static long[] takeWorkerHash(ByteBuffer buf, int size, int vs) {
+        BufferBuilder b = uploadingBuilder;
+        if (b == null) {
+            return null;
+        }
+        long[] pre = ((IAfterimageBufferBuilder) b).afterimage$takePreHash();
+        if (pre == null) {
+            return null;
+        }
+        if (!WORKER_HASH || vs != 28 || pre[0] != size || b.func_178966_f() != buf) {
+            workerStale++;
+            return null;
+        }
+        long[] h = new long[] {pre[1], pre[2]};
+        workerUsed++;
+        if (WORKER_CHECK_EVERY > 0 && (workerUsed <= 16 || workerUsed % WORKER_CHECK_EVERY == 0)) {
+            workerChecked++;
+            long[] m = Hash.of(buf, vs);
+            if (m[0] != h[0] || m[1] != h[1]) {
+                workerMismatch++;
+                WORKER_HASH = false;
+                logInfo("a chunk worker's fingerprint differed from the uploaded bytes; fingerprinting on the client thread from now on");
+                return m;
+            }
+        }
+        return h;
+    }
+
+    /** Far kept this VertexBuffer's GL buffer as a copy; the VertexBuffer holds a new, empty one now. */
+    public static void onStolen(VertexBuffer vb) {
+        IAfterimageVbo v = (IAfterimageVbo) (Object) vb;
+        int layer = v.afterimage$layer();
+        if (v.afterimage$owner() != null && layer >= 0 && layer < LAYERS) {
+            LIVE[layer] -= v.afterimage$lastSize();
+        }
+        v.afterimage$setLastSize(0);
+    }
+
     public static void onUpload(VertexBuffer vb, ByteBuffer buf) {
         if (!ENABLED || buf == null) {
             return;
@@ -192,9 +270,14 @@ public final class Capture {
 
             long t = System.nanoTime();
             int vs = v.afterimage$vertexSize();
-            long[] h = Hash.of(buf, vs);
+            long[] h = takeWorkerHash(buf, size, vs);
             long now = System.nanoTime();
-            hashNanos += now - t;
+            if (h == null) {
+                h = Hash.of(buf, vs);
+                now = System.nanoTime();
+                hashNanos += now - t;
+                mainHashed++;
+            }
 
             long key = rc.func_178568_j().func_177986_g();
             if (VERIFY) {
@@ -250,6 +333,8 @@ public final class Capture {
                 Disk.onWorld(mcw.field_71441_e);
             }
             ClientSync.drain();
+            Far.deleteTrash();
+            Far.checkMemory(System.nanoTime());
             Disk.tick(System.nanoTime());
         } catch (Throwable t) {
             logError("tick.world", t);
@@ -675,7 +760,9 @@ public final class Capture {
                 + ", cutout " + mb(LIVE[2]) + ", transl " + mb(LIVE[3]) + ")",
             "sections seen: " + SECTIONS.size() + ", non-empty " + nonEmpty + ", unique meshes " + UNIQUE.size()
                 + ", geometry of all seen " + mb(known),
-            "uploads " + uploads + " (" + mb(uploadBytes) + "), hashing " + (hashNanos / 1_000_000L) + " ms total, unowned "
+            "uploads " + uploads + " (" + mb(uploadBytes) + "), hashing " + (hashNanos / 1_000_000L) + " ms on client thread (" + mainHashed
+                + "), on workers " + (WORKER_NANOS.get() / 1_000_000L) + " ms (" + WORKER_HASHED.get() + "), handed over " + workerUsed
+                + ", stale " + workerStale + ", checked " + workerChecked + ", MISMATCH " + workerMismatch + ", unowned "
                 + unownedUploads + ", offthread " + offThreadUploads + ", VBO created " + vboCreated + " deleted " + vboDeleted,
             "verify: " + vDone + " done, exact " + vExact + ", reordered " + vReordered + ", DIFFERENT " + vDifferent
                 + ", SIZE " + vSize + " | discarded world " + vDiscardWorld + ", moved " + vDiscardMoved

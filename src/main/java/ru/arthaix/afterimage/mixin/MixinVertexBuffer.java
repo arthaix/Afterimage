@@ -75,6 +75,11 @@ public abstract class MixinVertexBuffer implements IAfterimageVbo {
     }
 
     @Override
+    public void afterimage$setGlId(int id) {
+        this.field_177365_a = id;
+    }
+
+    @Override
     public int afterimage$vertexSize() {
         return this.field_177363_b == null ? 0 : this.field_177363_b.func_177338_f();
     }

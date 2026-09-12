@@ -6,6 +6,6 @@
   "setSourceFile": true,
   "injectors": { "defaultRequire": 0 },
   "mixins": [ "MixinChunkChanges", "MixinWorldChanges" ],
-  "client": [ "MixinVertexBuffer", "MixinRenderChunk", "MixinRenderGlobal", "MixinChunkRenderContainer", "ViewFrustumAccessor" ],
+  "client": [ "MixinVertexBuffer", "MixinRenderChunk", "MixinRenderGlobal", "MixinChunkRenderContainer", "ViewFrustumAccessor", "MixinBufferBuilder", "MixinChunkRenderDispatcher", "MixinVertexBufferUploader" ],
   "server": [ ]
 }
