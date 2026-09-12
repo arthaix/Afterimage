@@ -7,12 +7,15 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -73,7 +76,8 @@ public final class Disk {
         final long sk;
         final long key;
         final int layer;
-        final byte[] data;
+        final ByteBuffer data;
+        final int size;
         final long exact;
         final long ms;
         final File dir;
@@ -81,7 +85,8 @@ public final class Disk {
 
         final long geomTime;
 
-        Job(long sk, long key, int layer, byte[] data, long exact, long ms, long geomTime, File dir, int gen) {
+        Job(long sk, long key, int layer, ByteBuffer data, int size, long exact, long ms, long geomTime, File dir, int gen) {
+            this.size = size;
             this.geomTime = geomTime;
             this.sk = sk;
             this.key = key;
@@ -166,14 +171,16 @@ public final class Disk {
     /** An upload waiting for vanilla to confirm that its RenderChunk still shows that position. */
     private static final class Held {
         final long key;
-        final byte[] data;
+        final ByteBuffer data;
+        final int size;
         final long exact;
         final long ms;
         final long geomTime;
 
-        Held(long key, byte[] data, long exact, long ms, long geomTime) {
+        Held(long key, ByteBuffer data, int size, long exact, long ms, long geomTime) {
             this.key = key;
             this.data = data;
+            this.size = size;
             this.exact = exact;
             this.ms = ms;
             this.geomTime = geomTime;
@@ -233,11 +240,11 @@ public final class Disk {
         ONDISK.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
-        HELD.clear();
-        heldBytes = 0L;
+        clearHeld();
         Loaded l;
         while ((l = READY.poll()) != null) {
             READY_BYTES.addAndGet(-l.data.capacity());
+            DirectPool.release(l.data);
         }
         scanPending = false;
         if (w == null || root == null) {
@@ -273,11 +280,11 @@ public final class Disk {
         ONDISK_TIME.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
-        HELD.clear();
-        heldBytes = 0L;
+        clearHeld();
         Loaded l;
         while ((l = READY.poll()) != null) {
             READY_BYTES.addAndGet(-l.data.capacity());
+            DirectPool.release(l.data);
         }
         scanPending = false;
         if (root == null) {
@@ -489,11 +496,10 @@ public final class Disk {
             HELD.put(rc, held);
         }
         if (held[layer] != null) {
-            heldBytes -= held[layer].data.length;
+            heldBytes -= held[layer].size;
+            DirectPool.release(held[layer].data);
         }
-        byte[] data = new byte[size];
-        buf.duplicate().get(data);
-        held[layer] = new Held(key, data, exact, ms, geomTime);
+        held[layer] = new Held(key, DirectPool.copyOf(buf, size), size, exact, ms, geomTime);
         heldBytes += size;
     }
 
@@ -513,14 +519,28 @@ public final class Disk {
             if (h == null) {
                 continue;
             }
-            heldBytes -= h.data.length;
+            heldBytes -= h.size;
             if (next != null && next != CompiledChunk.field_178502_a && h.key == key && !next.func_178491_b(layers[l])) {
-                commitUpload(h.key, l, null, h.data, h.data.length, h.exact, h.ms, h.geomTime);
+                commitUpload(h.key, l, null, h.data, h.size, h.exact, h.ms, h.geomTime);
                 heldCommitted++;
             } else {
+                DirectPool.release(h.data);
                 heldDropped++;
             }
         }
+    }
+
+    /** Client thread: forget every held upload and give its copy back. */
+    private static void clearHeld() {
+        for (Held[] held : HELD.values()) {
+            for (Held h : held) {
+                if (h != null) {
+                    DirectPool.release(h.data);
+                }
+            }
+        }
+        HELD.clear();
+        heldBytes = 0L;
     }
 
     /** RenderChunk.setPosition / deleteGlResources HEAD: uploads held for it belong nowhere now. */
@@ -534,15 +554,18 @@ public final class Disk {
         }
         for (Held h : held) {
             if (h != null) {
-                heldBytes -= h.data.length;
+                heldBytes -= h.size;
+                DirectPool.release(h.data);
                 heldDropped++;
             }
         }
     }
 
-    private static void commitUpload(long key, int layer, ByteBuffer buf, byte[] heldData, int size, long exact, long ms, long geomTime) {
+    /** heldData, when given, is owned by this call: it is either queued for writing or released. */
+    private static void commitUpload(long key, int layer, ByteBuffer buf, ByteBuffer heldData, int size, long exact, long ms, long geomTime) {
         File dir = worldDir;
         if (!ENABLED || dir == null || size <= 0) {
+            DirectPool.release(heldData);
             return;
         }
         long sk = key * 4 + layer;
@@ -550,6 +573,7 @@ public final class Disk {
         Job queued = LATEST.get(sk);
         if (queued != null) {
             if (queued.ms == ms) {
+                DirectPool.release(heldData);
                 return;
             }
         } else {
@@ -557,20 +581,18 @@ public final class Disk {
             if (d != null && d == ms) {
                 Long dt = ONDISK_TIME.get(sk);
                 if (dt == null || !Far.outdated(key, dt)) {
+                    DirectPool.release(heldData);
                     return;
                 }
                 // same bytes, but the file's tick predates a server change: rewrite it with the current tick
             }
         }
         if (BACKLOG.get() + size > WRITE_BACKLOG_MAX) {
+            DirectPool.release(heldData);
             return;
         }
-        byte[] data = heldData;
-        if (data == null) {
-            data = new byte[size];
-            buf.duplicate().get(data);
-        }
-        final Job job = new Job(sk, key, layer, data, exact, ms, geomTime, dir, generation);
+        ByteBuffer data = heldData != null ? heldData : DirectPool.copyOf(buf, size);
+        final Job job = new Job(sk, key, layer, data, size, exact, ms, geomTime, dir, generation);
         LATEST.put(sk, job);
         BACKLOG.addAndGet(size);
         WRITER.submit(() -> write(job));
@@ -605,6 +627,12 @@ public final class Disk {
         return new File(dir, "r." + (cx >> 5) + "." + (cz >> 5) + File.separator + cx + "." + sy + "." + cz + ".L" + layer + ".aimg");
     }
 
+    // writer thread only: long-lived scratch arrays instead of a heap copy per file
+    private static byte[] writeIn = new byte[1 << 20];
+    private static byte[] writeOut = new byte[1 << 20];
+    private static final byte[] WRITE_HEADER = new byte[64];
+    private static final Deflater DEFLATER = new Deflater(1);
+
     private static void write(Job j) {
         try {
             if (LATEST.get(j.sk) != j || j.gen != generation) {
@@ -612,35 +640,32 @@ public final class Disk {
             }
             File f = fileFor(j.dir, j.key, j.layer);
             f.getParentFile().mkdirs();
-            Deflater def = new Deflater(1);
-            ByteArrayOutputStream bos = new ByteArrayOutputStream(j.data.length / 2 + 64);
-            try {
-                def.setInput(j.data);
-                def.finish();
-                byte[] chunk = new byte[1 << 16];
-                while (!def.finished()) {
-                    int n = def.deflate(chunk);
-                    bos.write(chunk, 0, n);
+            int n = j.size;
+            if (writeIn.length < n) {
+                writeIn = new byte[n + (n >> 2)];
+            }
+            ByteBuffer src = j.data.duplicate();
+            src.clear();
+            src.limit(n);
+            src.get(writeIn, 0, n);
+            DEFLATER.reset();
+            DEFLATER.setInput(writeIn, 0, n);
+            DEFLATER.finish();
+            int outLen = 0;
+            while (!DEFLATER.finished()) {
+                if (writeOut.length - outLen < (1 << 16)) {
+                    writeOut = Arrays.copyOf(writeOut, writeOut.length * 2);
                 }
-            } finally {
-                def.end();
+                outLen += DEFLATER.deflate(writeOut, outLen, 1 << 16);
             }
             BlockPos p = BlockPos.func_177969_a(j.key);
+            ByteBuffer h = ByteBuffer.wrap(WRITE_HEADER);
+            h.putInt(MAGIC).putInt(VERSION).putInt(j.layer).putInt(p.func_177958_n()).putInt(p.func_177956_o()).putInt(p.func_177952_p())
+                .putInt(VS).putInt(n).putLong(j.exact).putLong(j.ms).putLong(j.geomTime).putInt(outLen);
             File tmp = new File(f.getPath() + ".tmp");
-            try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tmp), 1 << 16))) {
-                out.writeInt(MAGIC);
-                out.writeInt(VERSION);
-                out.writeInt(j.layer);
-                out.writeInt(p.func_177958_n());
-                out.writeInt(p.func_177956_o());
-                out.writeInt(p.func_177952_p());
-                out.writeInt(VS);
-                out.writeInt(j.data.length);
-                out.writeLong(j.exact);
-                out.writeLong(j.ms);
-                out.writeLong(j.geomTime);
-                out.writeInt(bos.size());
-                bos.writeTo(out);
+            try (FileOutputStream out = new FileOutputStream(tmp)) {
+                out.write(WRITE_HEADER, 0, h.position());
+                out.write(writeOut, 0, outLen);
             }
             try {
                 Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -650,14 +675,15 @@ public final class Disk {
             ONDISK.put(j.sk, j.ms);
             ONDISK_TIME.put(j.sk, j.geomTime);
             WRITTEN_FILES.incrementAndGet();
-            WRITTEN_RAW.addAndGet(j.data.length);
-            WRITTEN_COMP.addAndGet(bos.size());
+            WRITTEN_RAW.addAndGet(n);
+            WRITTEN_COMP.addAndGet(outLen);
         } catch (Throwable t) {
             ERRORS.incrementAndGet();
             Capture.logError("disk.write", t);
         } finally {
             LATEST.remove(j.sk, j);
-            BACKLOG.addAndGet(-j.data.length);
+            BACKLOG.addAndGet(-j.size);
+            DirectPool.release(j.data);
         }
     }
 
@@ -687,8 +713,7 @@ public final class Disk {
         ONDISK.clear();
         LATEST.clear();
         PENDING_DELETE.clear();
-        HELD.clear();
-        heldBytes = 0L;
+        clearHeld();
         WRITER.submit(() -> {
             deleteTree(dir);
             dir.mkdirs();
@@ -845,38 +870,78 @@ public final class Disk {
         }
     }
 
+    // loader thread only
+    private static byte[] readComp = new byte[1 << 20];
+    private static byte[] readRaw = new byte[1 << 20];
+    private static final Inflater INFLATER = new Inflater();
+
+    private static final byte[] READ_HEADER = new byte[64];
+
+    /**
+     * Loader thread. Sizes come from the header of the file as opened here: the writer may have replaced the file with
+     * a newer version since the scan read its header, and the scanned sizes then no longer match the body.
+     */
     private static ByteBuffer readBody(Meta m) {
-        try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(m.file), 1 << 16))) {
-            in.skipBytes(m.headerLen);
-            byte[] comp = new byte[m.comp];
-            in.readFully(comp);
-            Inflater inf = new Inflater();
-            byte[] raw = new byte[m.raw];
-            try {
-                inf.setInput(comp);
-                int off = 0;
-                while (off < raw.length && !inf.finished()) {
-                    int n = inf.inflate(raw, off, raw.length - off);
-                    if (n == 0 && (inf.needsInput() || inf.needsDictionary())) {
-                        break;
-                    }
-                    off += n;
-                }
-                if (off != raw.length) {
-                    readError("inflate " + off + "/" + raw.length, m.file, null);
-                    return null;
-                }
-            } finally {
-                inf.end();
+        try (FileInputStream in = new FileInputStream(m.file)) {
+            if (!readFully(in, READ_HEADER, m.headerLen)) {
+                readError("short header", m.file, null);
+                return null;
             }
-            ByteBuffer bb = ByteBuffer.allocateDirect(raw.length).order(ByteOrder.nativeOrder());
-            bb.put(raw);
+            ByteBuffer h = ByteBuffer.wrap(READ_HEADER, 0, m.headerLen);
+            if (h.getInt() != MAGIC || h.getInt(4) != (m.headerLen == 60 ? 2 : 1) || h.getInt(8) != m.layer || h.getInt(24) != VS) {
+                readError("header changed", m.file, null);
+                return null;
+            }
+            int raw = h.getInt(28);
+            int comp = h.getInt(m.headerLen - 4);
+            if (raw <= 0 || raw % (VS * 4) != 0 || comp <= 0) {
+                readError("bad sizes " + raw + "/" + comp, m.file, null);
+                return null;
+            }
+            if (readComp.length < comp) {
+                readComp = new byte[comp + (comp >> 2)];
+            }
+            if (!readFully(in, readComp, comp)) {
+                readError("short body", m.file, null);
+                return null;
+            }
+            if (readRaw.length < raw) {
+                readRaw = new byte[raw + (raw >> 2)];
+            }
+            INFLATER.reset();
+            INFLATER.setInput(readComp, 0, comp);
+            int off = 0;
+            while (off < raw && !INFLATER.finished()) {
+                int k = INFLATER.inflate(readRaw, off, Math.min(1 << 20, raw - off));
+                if (k == 0 && (INFLATER.needsInput() || INFLATER.needsDictionary())) {
+                    break;
+                }
+                off += k;
+            }
+            if (off != raw) {
+                readError("inflate " + off + "/" + raw, m.file, null);
+                return null;
+            }
+            ByteBuffer bb = DirectPool.acquire(raw);
+            bb.put(readRaw, 0, raw);
             bb.flip();
             return bb;
         } catch (Throwable t) {
             readError("body", m.file, t);
             return null;
         }
+    }
+
+    private static boolean readFully(InputStream in, byte[] b, int len) throws IOException {
+        int got = 0;
+        while (got < len) {
+            int k = in.read(b, got, len - got);
+            if (k < 0) {
+                return false;
+            }
+            got += k;
+        }
+        return true;
     }
 
     /** Main thread, from Far.render before drawing: GPU uploads of loaded sections, time-budgeted. */
@@ -888,18 +953,22 @@ public final class Disk {
         Loaded l;
         while ((l = READY.poll()) != null) {
             READY_BYTES.addAndGet(-l.data.capacity());
-            if (l.gen != generation) {
-                continue;
-            }
-            if (Far.outdated(l.key, l.geomTime)) {
-                OUTDATED_SKIPPED.incrementAndGet();
-                continue;
-            }
-            if (Far.acceptFromDisk(l.key, l.layer, l.x, l.y, l.z, frustum)) {
-                Far.uploadLayer(l.key, l.x, l.y, l.z, l.layer, l.data, l.geomTime);
-                uploadedFromDisk++;
-            } else {
-                rejectedFromDisk++;
+            try {
+                if (l.gen != generation) {
+                    continue;
+                }
+                if (Far.outdated(l.key, l.geomTime)) {
+                    OUTDATED_SKIPPED.incrementAndGet();
+                    continue;
+                }
+                if (Far.acceptFromDisk(l.key, l.layer, l.x, l.y, l.z, frustum)) {
+                    Far.uploadLayer(l.key, l.x, l.y, l.z, l.layer, l.data, l.geomTime);
+                    uploadedFromDisk++;
+                } else {
+                    rejectedFromDisk++;
+                }
+            } finally {
+                DirectPool.release(l.data);
             }
             if (System.nanoTime() > deadline) {
                 break;

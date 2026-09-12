@@ -219,6 +219,24 @@ public final class Far {
         return c != null && !c.func_76621_g();
     }
 
+    /** chunk key -> (frame + 1) * 2 + loaded: the far pass asks for the same chunks for every visible section. */
+    private static final Long2LongOpenHashMap LOADED_IN_FRAME = new Long2LongOpenHashMap();
+
+    private static boolean chunkLoadedThisFrame(BlockPos p) {
+        long ck = ChunkPos.func_77272_a(p.func_177958_n() >> 4, p.func_177952_p() >> 4);
+        long stamp = ((long) frame + 1L) << 1;
+        long v = LOADED_IN_FRAME.get(ck);
+        if ((v & ~1L) == stamp) {
+            return (v & 1L) != 0L;
+        }
+        boolean loaded = chunkLoaded(p);
+        if (LOADED_IN_FRAME.size() > 262144) {
+            LOADED_IN_FRAME.clear();
+        }
+        LOADED_IN_FRAME.put(ck, stamp | (loaded ? 1L : 0L));
+        return loaded;
+    }
+
     private static void capture(RenderChunk rc) {
         if (!supported()) {
             return;
@@ -426,7 +444,7 @@ public final class Far {
                 probe.func_181079_c(en.x, en.y, en.z);
                 RenderChunk rc = vf.afterimage$getRenderChunk(probe);
                 en.vanillaNow = rc != null && rc.func_178568_j().func_177986_g() == en.key
-                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoaded(probe);
+                        && rc.func_178571_g() != CompiledChunk.field_178502_a && chunkLoadedThisFrame(probe);
                 if (en.vanillaNow) {
                     if (settled(en, now, rc)) {
                         skippedVanilla++;
