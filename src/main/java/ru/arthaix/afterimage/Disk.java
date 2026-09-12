@@ -467,14 +467,16 @@ public final class Disk {
     /** Main thread, from Capture.onUpload. layer 0..2, 28-byte vertex format. */
     /**
      * Client thread, from Capture.onUpload. An upload is written only when its RenderChunk vouches for it at its current
-     * position: either the current compiled chunk already has that layer (a rebuild in place, or a translucent resort),
+     * position: it already has a compiled chunk there (a rebuild in place, a translucent resort, a LittleTiles re-upload),
      * or vanilla later sets a compiled chunk with that layer for the same position. Vanilla queues uploads for the client
      * thread; one queued before the RenderChunk moved arrives under the new position with the old position's geometry.
      * Such uploads are held and dropped when the RenderChunk moves again, frees its buffers, or compiles without that layer.
      */
     public static void onSectionUpload(RenderChunk rc, long key, int layer, ByteBuffer buf, int size, long exact, long ms, long geomTime) {
         CompiledChunk cc = rc.func_178571_g();
-        if (cc != null && cc != CompiledChunk.field_178502_a && !cc.func_178491_b(BlockRenderLayer.values()[layer])) {
+        // A RenderChunk that has a compiled chunk still shows the position it was built for, so its uploads belong there.
+        // The layer flag is not checked: LittleTiles uploads its tiles into a layer first and marks the layer used after.
+        if (cc != null && cc != CompiledChunk.field_178502_a) {
             commitUpload(key, layer, buf, null, size, exact, ms, geomTime);
             return;
         }
