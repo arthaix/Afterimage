@@ -1,0 +1,9 @@
+{
+  "package": "ru.arthaix.keystone.opffix.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "client": [ "MixinDownloadThread" ],
+  "mixins": [ ]
+}

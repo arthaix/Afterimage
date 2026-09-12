@@ -1,0 +1,16 @@
+{
+  "package": "ru.arthaix.keystone.chunkkeep.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "mixins": [],
+  "client": [],
+  "server": [
+    "MixinPlayerChunkMap",
+    "MixinChunkProviderServer",
+    "MixinWorldTicking",
+    "MixinPlayerChunkMapSend",
+    "MixinMovementCheck"
+  ]
+}

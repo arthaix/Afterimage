@@ -1,5 +1,5 @@
 Manifest-Version: 1.0
-FMLCorePlugin: ru.arthaix.afterimage.AfterimageCore
+FMLCorePlugin: ru.arthaix.keystone.KeystoneCore
 FMLCorePluginContainsFMLMod: true
 ForceLoadAsMod: true
 

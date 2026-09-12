@@ -1,0 +1,9 @@
+{
+  "package": "ru.arthaix.keystone.cbbakecache.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "client": [ "MixinChiseledBlockBaked", "BlockStateRefAccessor", "MixinModelUtil" ],
+  "mixins": [ ]
+}

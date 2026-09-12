@@ -1,0 +1,10 @@
+{
+  "package": "ru.arthaix.keystone.teunloadbatch.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "mixins": [ "MixinWorld", "MixinTileEntityCreate", "MixinChunkTileAccess", "MixinTileEntitySlot", "MixinChunkEntityBoxes", "MixinChunkUnload", "MixinWorldTickLoaded", "MixinTileEntityTags", "MixinNBTTagCompoundRaw", "MixinSPacketChunkData", "MixinNBTTagListAttachment", "MixinSPacketChunkDataDecode", "MixinPlayerChunkMapEntryChanges", "MixinWorldTickableRemoval" ],
+  "client": [ "MixinChunkRenderDispatcher", "BufferBuilderAccessor", "MixinScreenShotHelper" ],
+  "server": [ ]
+}

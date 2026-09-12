@@ -1,0 +1,10 @@
+{
+  "package": "ru.arthaix.keystone.packetbudget.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "mixins": [ ],
+  "client": [ "MixinMinecraft", "MixinNetHandlerPlayClient", "MultiBlockChangeAccessor" ],
+  "server": [ ]
+}

@@ -1,0 +1,34 @@
+{
+  "package": "ru.arthaix.keystone.ltfix.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": false,
+  "setSourceFile": true,
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "MixinLittleTile",
+    "MixinLittleTileType",
+    "MixinLittleTileBlockName",
+    "MixinLittleTileRegistry",
+    "MixinLittleTileLoadExtra",
+    "MixinLtTagCache",
+    "MixinCbTagCache",
+    "MixinNeighborUpdateOrganizer"
+  ],
+  "client": [
+    "MixinRenderingThread",
+    "MixinBufferLink",
+    "MixinChunkBlockLayerManager",
+    "MixinChunkBlockLayerCache",
+    "MixinTileEntityLittleTiles",
+    "RenderManagerAccessor",
+    "MixinMtsInterfaceRender",
+    "MixinJmRegionImageCache",
+    "MixinJmTextureImpl",
+    "MixinJmRegionImageHandler",
+    "MixinLittleNBTCompressionTools"
+  ],
+  "server": []
+}

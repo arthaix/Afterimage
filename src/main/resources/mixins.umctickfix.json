@@ -1,0 +1,9 @@
+{
+  "package": "ru.arthaix.keystone.umctickfix.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "client": [ "MixinBlockRender", "MixinGlobalRender" ],
+  "mixins": [ ]
+}

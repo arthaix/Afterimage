@@ -1,10 +1,10 @@
-Afterimage License
+Keystone License
 
 Copyright (c) 2026 Aleksei Usenko (arthaix). All rights reserved.
 
 1. Definitions
-   "Software" means Afterimage: its source code, compiled binaries, resources,
-   documentation and any part of them.
+   "Software" means Keystone, including Afterimage: its source code, compiled
+   binaries, resources, documentation and any part of them.
    "Author" means Aleksei Usenko (arthaix).
 
 2. Permitted use
@@ -38,6 +38,9 @@ Copyright (c) 2026 Aleksei Usenko (arthaix). All rights reserved.
    automatically.
 
 7. Third-party software
-   The Software requires Minecraft Forge and MixinBooter, and is designed to
-   work alongside OptiFine, Chisels & Bits and LittleTiles. These are separate
-   works under their own licenses and are not covered by this license.
+   The Software requires Minecraft Forge and MixinBooter. At runtime it patches
+   Minecraft, Forge and, when they are installed, LittleTiles, CreativeCore,
+   Chisels & Bits, UniversalModCore, OnlinePictureFrame, Immersive Vehicles
+   and JourneyMap, and is designed to work alongside OptiFine. These are
+   separate works under their own licenses and are not covered by this
+   license; the Software contains none of their code.

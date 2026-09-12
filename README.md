@@ -1,22 +1,102 @@
-# Afterimage
+# Keystone
 
-Keeps the city on screen in Minecraft 1.12.2. Chunk sections that vanilla throws away (when you fly past the render
-distance, when the server unloads chunks, when renderers are reloaded) are kept as exact GPU copies, drawn beyond the
-render distance and cached on disk, so everything you have seen is back the moment you rejoin.
-Built for city-scale builds made of [Chisels & Bits](https://www.curseforge.com/minecraft/mc-mods/chisels-bits) and
-[LittleTiles](https://www.curseforge.com/minecraft/mc-mods/littletiles).
+Keystone is a Forge mod for Minecraft 1.12.2 that keeps huge builds playable. It is meant for servers and players whose
+worlds are full of [Chisels & Bits](https://www.curseforge.com/minecraft/mc-mods/chisels-bits) and
+[LittleTiles](https://www.curseforge.com/minecraft/mc-mods/littletiles) blocks: detailed cities, interiors, statues,
+anything made of many small pieces.
+
+Every chiseled or LittleTiles block carries extra data the game has to keep track of. A few thousand are no problem; a
+city has millions, and at that size parts of Minecraft, Forge and these mods, written with small worlds in mind, freeze
+the server on large edits, make every flight stutter and lose LittleTiles blocks. Keystone fixes those spots without
+changing the game itself: blocks, builds and mod behaviour stay the same, only the slow work is done faster, in the
+background or in smaller steps. One jar serves the client and the server.
+
+Keystone includes **Afterimage**, which keeps everything you have seen on screen far beyond the render distance.
 
 Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released jar, but not modify or redistribute it (see LICENSE).
 
-## Features
+## Installation
+
+Put `z-keystone-<version>.jar` into the `mods` folder of the client and of the server, together with MixinBooter 10.x.
+Every part loads only where it applies: server fixes on a dedicated server, client fixes on the client, and the fixes
+for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only when that mod is installed.
+
+- Keep the file name. Forge loads coremods in file-name order, and a name that sorts before `mixinbooter` stops the
+  game at launch with `NoClassDefFoundError: zone/rong/mixinbooter/IEarlyMixinLoader`.
+- Remove the separate jars Keystone replaces: `z-afterimage`, `teunloadbatch`, `ltfix`, `z-chunkkeep`, `packetbudget`,
+  `cbbakecache`, `umctickfix`, `opffix`.
+- OptiFine: **Render Regions off** (Afterimage).
+- The mod list shows two entries, Keystone and Afterimage: client and server find each other's Afterimage by that name.
+
+## What it fixes
+
+### Server
+
+- **Tile entity lists in constant time.** `World.loadedTileEntityList` is an indexed list: remove, removeAll and
+  contains no longer scan millions of tile entities, which froze the server on WorldEdit operations and chunk unloads.
+- **Large block edits.** A replaced tile entity leaves the ticking list in an ordered batch instead of a scan per block;
+  Forge's list of changed blocks per chunk no longer compares each change with all earlier ones; LittleTiles' neighbour
+  update queue checks for duplicates with a hash set. These three were 72% of the server time of large WorldEdit edits.
+- **Chunk packets reuse tile data.** The update tags of unchanged Chisels & Bits and LittleTiles tile entities are
+  serialized once and reused. The first 2000 and every 500th reuse are compared with a fresh tag; any difference turns
+  the cache off.
+- **Tile entity ticking** skips the loaded-chunk lookup for tile entities whose chunk cannot have unloaded since.
+- **Chunk keep.** Chunks a player has received stay loaded and registered to them within a keep radius, so flying back
+  and forth no longer unloads, reloads and re-sends them. Chunk packets get a time budget per tick, and chunks that
+  enter view all at once (login, teleport) are sent nearest first over the following ticks.
+- **City preload.** Chunks listed in `config/chunkkeep-pins.txt` (one `chunkX chunkZ` pair per line, `#` starts a
+  comment) are loaded at start through Forge's async chunk IO, paced by tick time, and stay loaded.
+- **Builders fly.** Creative and spectator players are not pulled back by "moved too quickly".
+- **No kick** with "Internal server error" when a modded entity has no bounding box yet.
+- **LittleTiles loading** splits tile group NBT in linear time (it was quadratic, 29% of chunk loading on dense builds)
+  and looks up tile constructors and block names once.
+
+### Client
+
+- **Afterimage**, see below.
+- **LittleTiles data is parsed in the background.** Right after a chunk packet is decoded, the tiles of its LittleTiles
+  tile entities are read on three worker threads; the client thread takes the result instead of parsing.
+- **LittleTiles tiles never vanish.** Tile geometry is kept in memory instead of being read back from the chunk's GPU
+  buffer, which made tiles disappear or show another chunk's bytes. Geometry not drawn for 30 s is packed until it is
+  needed again. Tiles whose data arrives after their chunk was built are rendered again, and the rendering thread no
+  longer spins and floods the log on tiles without data.
+- **Packet budget.** The scheduled-task queue, chunk packets included, runs for at most 10 ms per frame, and the tile
+  entity tags of a chunk are applied 4 ms per frame. Nothing is dropped or reordered.
+- **Chisels & Bits baking** filters each voxel blob once per state and layer instead of seven times per block, and its
+  model caches are thread-safe (chunk worker crash).
+- **UniversalModCore** tracks its tile entities incrementally instead of scanning every loaded tile entity each tick.
+- **Render builders.** Three per chunk worker instead of ten, and builders that grew are replaced once the pool holds
+  more than 1 GB of native memory.
+- **Screenshots** are written on a background thread.
+- **Immersive Vehicles** textures are decoded off the client thread; **JourneyMap** writes and decodes region images in
+  the background.
+- **OnlinePictureFrame** downloads one picture at a time, so pictures stop failing with "Failed to parse GIF".
+
+### Lag diagnostics
+
+In the game or server folder:
+
+| File | Content |
+|---|---|
+| `ltfix-metrics.log` | a line every 10 s: frame or tick spikes, queues, memory, cache and edit counters |
+| `ltfix-hitches.log` | stacks and GC time of client frames over 50 ms |
+| `ltfix-ticks.log` | stacks and GC time of server ticks over 150 ms |
+| `ltfix-freeze.log` | the stack of any server tick running for over 5 s, repeated while it stays stuck |
+
+## Afterimage
+
+Chunk sections that vanilla throws away (when you fly past the render distance, when the server unloads chunks, when
+renderers are reloaded) are kept as exact GPU copies, drawn beyond the render distance and cached on disk, so
+everything you have seen is back the moment you rejoin.
 
 - **Exact, not LOD**: the far zone draws the very bytes the game uploaded for each section. No downsampling, no
   simplified buildings. Rebuild determinism and capture correctness were proven in game by a built-in verifier
   (`-Dafterimage.verify=true`).
 - **All block layers**: solid, cutout and translucent (glass, stained glass, water, ice). Translucent copies are drawn
-  after the opaque ones, back to front and blended, the way vanilla draws its translucent layer.
-- **Copied on the GPU**: section geometry is duplicated with `glCopyBufferSubData` at the moment vanilla would lose it,
-  with no readback to the CPU and no GL queries that would stall on the driver.
+  after the opaque ones, back to front and blended, and only where vanilla does not draw that section itself.
+- **No copies in the driver**: a section leaving the view keeps its own GL buffer as its copy. Otherwise geometry is
+  duplicated with `glCopyBufferSubData` at the moment vanilla would lose it, with no readback to the CPU and no GL
+  queries that would stall on the driver. Upload fingerprints are computed on the chunk workers.
 - **Persistent**: sections are written to a per-server, per-dimension cache in the background (deflate, atomic writes,
   newer versions supersede queued older ones). On join the cache is restored nearest-first, uploaded to the GPU for at
   most 4 ms per frame.
@@ -29,32 +109,23 @@ Author: Aleksei Usenko (arthaix). All rights reserved: you may use the released 
   refreshed from every new build.
 - **Seamless fog**: while the far zone has content, normal fog is pushed out (2048 blocks by default), so near terrain
   and far zone fade into the sky together. Water, lava and blindness keep their vanilla fog.
-- **Budgeted**: 8 GB of VRAM for the far zone by default, farthest sections are evicted first.
+- **Budgeted**: 8 GB of VRAM for the far zone by default, farthest sections are evicted first. Each GB of copies also
+  holds RAM in the graphics driver, so while the machine is short of RAM the budget shrinks, and it grows back afterwards.
 - **Works with** OptiFine (Render Regions off), Chisels & Bits and LittleTiles, including LittleTiles' merged
   re-uploads of chunk buffers.
-- **Server sync (optional)**: with Afterimage on the server, the server records the tick of every change clients
-  have to re-render (block changes and block update notifications, which LittleTiles and Chisels & Bits use for their
-  own edits; chunk loading does not count). On join the client asks for everything since its last sync and drops copies
-  and cached files made before those changes; while playing, new changes arrive every second.
+- **Server sync**: with Keystone on the server, the server records the tick of every change clients have to re-render
+  (block changes and block update notifications, which LittleTiles and Chisels & Bits use for their own edits; chunk
+  loading does not count). On join the client asks for everything since its last sync and drops copies and cached files
+  made before those changes; while playing, new changes arrive every second. Caches of different worlds on one server
+  stay apart.
 - **Measures itself**: live section-geometry VRAM, unique meshes, per-section sizes (`sections.csv`) and raw geometry
   samples for offline analysis.
 
-## Usage
+Recommended video settings: **Render Distance** 16-24 (the far zone keeps the rest), OptiFine **Render Regions: Off**
+(required). Fog can stay on. Play: every place you visit is cached as you see it, and when you rejoin the cached city is
+on screen again within seconds, before the server has sent a single far chunk.
 
-Put the jar into the `mods` folder of the client together with MixinBooter. The server does not need it, but it
-helps: put the same jar (with MixinBooter) on the server too, and it tells clients which chunks changed while they were
-away, so a cache never shows buildings that no longer exist, and caches of different worlds on one server stay apart.
-Keep the file name `z-afterimage-<version>.jar`: Forge loads coremods in file-name order, and a name that sorts
-before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/rong/mixinbooter/IEarlyMixinLoader`.
-
-1. Recommended video settings: **Render Distance** 16-24 (the far zone keeps the rest), OptiFine **Render Regions:
-   Off** (required). Fog can stay on.
-2. Play. Every place you visit is cached as you see it.
-3. Rejoin: the cached city is on screen again within seconds, before the server has sent a single far chunk.
-
-`/afterimage` shows what is going on: GPU geometry, far zone, disk cache and verifier.
-
-## Commands
+### Commands
 
 ```
 /afterimage                 status: GPU section geometry, far zone, disk cache, verifier
@@ -69,7 +140,78 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 /afterimage off|on          stop / resume upload tracking
 ```
 
+### Files
+
+Everything lives in `minecraft/afterimage/`:
+
+| Path | Content |
+|---|---|
+| `cache/<server>/[<world id>/]DIM<n>/r.<rx>.<rz>/<cx>.<sy>.<cz>.L<layer>.aimg` | cached section geometry (world id when the server has Keystone) |
+| `cache/<server>/<world id>/DIM<n>/sync.txt` | last server tick whose changes this cache has applied |
+| `summary.log` | one status line per minute |
+| `verify.log`, `mismatch/` | verifier results and dumps of any mismatch |
+| `sections.csv`, `samples/` | measurements for the tools below |
+| `errors.log` | any error; a failing part disables itself instead of crashing the game |
+
+On the server, changes are recorded in `<world>/afterimage/`.
+
+### Limitations
+
+- Tile entity special renderers and entities draw themselves outside chunk geometry (signs, chests, banners, beds,
+  Immersive Railroading tracks and trains, LittleTiles animated structures, vehicles), so they are not in the far zone.
+- Without Keystone on the server, edits made by other players while you are far away stay out of date in your cache
+  until you come near them.
+- Shader packs and OptiFine Render Regions are not supported.
+
 ## Configuration (JVM arguments)
+
+Everything works with the defaults; these are for tuning and for turning a part off.
+
+### Server
+
+| Key | Default | Meaning |
+|---|---|---|
+| `-Dteunloadbatch.tagCache` | true | reuse serialized tile entity update tags in chunk packets (dedicated server) |
+| `-Dteunloadbatch.tagCacheMB` | 768 | bytes of reusable tags kept, oldest dropped first |
+| `-Dteunloadbatch.deferTickableRemoval` | true | replaced tile entities leave the ticking list in ordered batches |
+| `-Dteunloadbatch.dedupBlockChanges` | true | changed blocks of a chunk are deduplicated with a bit set |
+| `-Dltfix.neighborDedup` | true | LittleTiles' neighbour update queue checks duplicates with a hash set |
+| `-Dchunkkeep.radius` | 20 | keep radius in chunks |
+| `-Dchunkkeep.sweepTicks` | 20 | how often kept chunks are checked, in ticks |
+| `-Dchunkkeep.heapGuardPercent` | 85 | above this heap use the farthest half of kept chunks is released |
+| `-Dchunkkeep.sendBudgetMs` | 15 | time for chunk packets per tick; 0 sends as vanilla does |
+| `-Dchunkkeep.enterBudgetMs` | 10 | time per tick for chunks that enter view at once; the rest follows nearest first |
+| `-Dchunkkeep.preload` | true | load the pinned chunks at start |
+| `-Dchunkkeep.preloadMs` | 10 | main-thread time per tick for queuing pinned chunks |
+| `-Dchunkkeep.preloadTickHighMs` | 40 | a longer tick halves the number of chunks loading at once |
+| `-Dchunkkeep.preloadTickLowMs` | 25 | a shorter tick lets one more load at once |
+| `-Dchunkkeep.preloadMaxInFlight` | 32 | most pinned chunks loading at once |
+| `-Dchunkkeep.preloadIoThreads` | cores / 3, 2 to 8 | chunk IO threads during preload |
+| `-Dchunkkeep.skipSpeedCheckForBuilders` | true | creative and spectator players skip "moved too quickly" |
+
+### Client
+
+| Key | Default | Meaning |
+|---|---|---|
+| `-Dltfix.preparse` | true | parse LittleTiles data from chunk packets in the background |
+| `-Dltfix.preparseThreads` | 3 | threads for that |
+| `-Dltfix.pack` | true | pack LittleTiles geometry that has not been drawn for a while |
+| `-Dltfix.packAfterMs` | 30000 | time without drawing before geometry is packed |
+| `-Dltfix.packThreads` | 2 | packing threads |
+| `-Dltfix.packGcMB` | 1024 | freed geometry after which a concurrent GC cycle is requested (only with `-XX:+ExplicitGCInvokesConcurrent` or Shenandoah) |
+| `-Dltfix.directGcMB` | 6144 | direct memory above which such a cycle is requested |
+| `-Dltfix.renderOnRead` | true | render tiles again whose data arrives after their chunk was built |
+| `-Dltfix.retryMs` | 200 | delay before a tile without data is tried again |
+| `-Dltfix.jmPrewarm` | true | decode JourneyMap region images around the player ahead |
+| `-Dltfix.viewChunks` | 6 | server view distance, for the missing-chunks counter in the metrics |
+| `-Dpacketbudget.ms` | 10 | scheduled-task time per frame |
+| `-Dpacketbudget.teMs` | 4 | chunk tile entity tag time per frame |
+| `-Dcbbakecache.othersize` | 4096 | entries of the Chisels & Bits neighbour blob cache |
+| `-Dumctickfix.slice` | 20000 | tile entities checked per tick for new UniversalModCore ones |
+| `-Dteunloadbatch.buildersPerWorker` | 3 | render builders per chunk worker |
+| `-Dteunloadbatch.builderBudgetMB` | 1024 | native memory of the builder pool above which grown builders are replaced |
+
+### Afterimage
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -80,52 +222,64 @@ before `mixinbooter` stops the game at launch with `NoClassDefFoundError: zone/r
 | `-Dafterimage.fogEnd` | 2048 | fog end while the far zone has content, in blocks; 0 keeps vanilla fog |
 | `-Dafterimage.settleMs` | 20000 | a freshly loaded vanilla section stays hidden behind its copy until they match, the server reports a change, or vanilla is quiet this long |
 | `-Dafterimage.hideNear` | 32 | sections nearer than this many blocks are never hidden behind their copy |
+| `-Dafterimage.steal` | true | a leaving section's own GL buffer becomes its copy; false copies it on the GPU |
+| `-Dafterimage.workerHash` | true | upload fingerprints are computed on the chunk workers |
 | `-Dafterimage.disk` | true | disk cache on or off |
 | `-Dafterimage.diskUploadMs` | 4 | per-frame time budget for uploading restored sections |
 | `-Dafterimage.enabled` | true | upload tracking and measurements (far-zone reuse and the disk cache rely on it) |
 | `-Dafterimage.verify` | false | development only: verifier (forced rebuilds, GPU readbacks) and raw geometry samples |
 
-## Files
+### Diagnostics
 
-Everything lives in `minecraft/afterimage/`:
+| Key | Default | Meaning |
+|---|---|---|
+| `-Dltfix.hitchMs` | 50 | client frames longer than this are sampled |
+| `-Dltfix.tickMs` | 150 | server ticks longer than this are sampled |
+| `-Dltfix.sampleMs` | 10 | sampling interval |
+| `-Dltfix.freezeMs` | 5000 | a server tick running longer than this is written to `ltfix-freeze.log` |
 
-| Path | Content |
+## Source layout
+
+| Package | Part |
 |---|---|
-| `cache/<server>/[<world id>/]DIM<n>/r.<rx>.<rz>/<cx>.<sy>.<cz>.L<layer>.aimg` | cached section geometry (world id when the server has Afterimage) |
-| `cache/<server>/<world id>/DIM<n>/sync.txt` | last server tick whose changes this cache has applied |
-| `summary.log` | one status line per minute |
-| `verify.log`, `mismatch/` | verifier results and dumps of any mismatch |
-| `sections.csv`, `samples/` | measurements for the tools below |
-| `errors.log` | any error; a failing part disables itself instead of crashing the game |
-
-## Limitations
-
-- Tile entity special renderers and entities draw themselves outside chunk geometry (signs, chests, banners, beds,
-  Immersive Railroading tracks and trains, LittleTiles animated structures, vehicles), so they are not in the far zone.
-- Without Afterimage on the server, edits made by other players while you are far away stay out of date in your cache
-  until you come near them. With it, changed chunks are dropped from the cache and show again once you come near.
-- Shader packs and OptiFine Render Regions are not supported.
+| `ru.arthaix.keystone` | the mod class, the coremod with the early mixin configurations, the late loader for the mixins into other mods |
+| `ru.arthaix.afterimage` | Afterimage (its mod classes are in `src/mod/java`) |
+| `ru.arthaix.keystone.teunloadbatch` | Minecraft and Forge: tile entity lists, block edits, chunk packet tags, render builders, screenshots |
+| `ru.arthaix.keystone.chunkkeep` | keep radius, chunk sending budgets, pinned chunks and their preload (dedicated server) |
+| `ru.arthaix.keystone.ltfix` | LittleTiles 1.5.14, Immersive Vehicles and JourneyMap fixes, lag metrics and freeze logs |
+| `ru.arthaix.keystone.packetbudget` | client packet budget |
+| `ru.arthaix.keystone.cbbakecache` | Chisels & Bits baking cache |
+| `ru.arthaix.keystone.umctickfix` | UniversalModCore tile entity tracking |
+| `ru.arthaix.keystone.opffix` | OnlinePictureFrame downloads |
 
 ## Building
 
-The sources call Minecraft by SRG names and hook it with early MixinBooter mixins, so there is no reobfuscation step
-and the build is a plain two-pass `javac` instead of Gradle. Put these jars into `libs/`:
+The sources call Minecraft by SRG names and hook it with MixinBooter mixins, so there is no reobfuscation step and the
+build is a plain two-pass `javac` instead of Gradle. Put these jars into `libs/`:
 
 ```
 libs/mixinbooter-10.7.jar
-libs/forge-1.12.2-srg.jar          Forge 1.12.2 srgBin jar (Minecraft + Forge, SRG names)
-libs/forge-1.12.2-universal.jar    Forge 1.12.2-14.23.5.x universal jar
-libs/forge-1.12.2-dev.jar          Forge 1.12.2 dev jar (MCP names), used only for the @Mod class
-libs/lwjgl-2.9.4.jar               LWJGL 2.9.4-nightly-20150209
-libs/netty-all-4.1.9.Final.jar    Netty 4.1.9 (Minecraft 1.12.2 library)
-libs/fastutil-7.1.0.jar           fastutil 7.1.0 (Minecraft 1.12.2 library)
-libs/guava-21.0.jar              Guava 21.0 (Minecraft 1.12.2 library)
+libs/forge-1.12.2-srg.jar                          Forge 1.12.2 srgBin jar (Minecraft + Forge, SRG names)
+libs/forge-1.12.2-universal.jar                    Forge 1.12.2-14.23.5.2860 universal jar
+libs/forge-1.12.2-dev.jar                          Forge 1.12.2 dev jar (MCP names), used only for Afterimage's mod classes
+libs/lwjgl-2.9.4.jar                               LWJGL 2.9.4-nightly-20150209
+libs/netty-all-4.1.9.Final.jar                     Netty 4.1.9 (Minecraft 1.12.2 library)
+libs/fastutil-7.1.0.jar                            fastutil 7.1.0 (Minecraft 1.12.2 library)
+libs/guava-21.0.jar                                Guava 21.0 (Minecraft 1.12.2 library)
+libs/log4j-api-2.17.1.jar                          Log4j API 2.x
+libs/LittleTiles_v1.5.14_mc1.12.2.jar              the mods Keystone patches, to compile against
+libs/CreativeCore_v1.10.61_mc1.12.2.jar
+libs/chiselsandbits-14.33.jar
+libs/UniversalModCore-1.12.2-forge-1.1.4-580823d.jar
+libs/OnlinePicFrame_v1.5.0-pre1_mc1.12.2.jar
+libs/log4j-core-2.17.1.jar                         tests only
 ```
 
 then
 
 ```
-JAVA8_HOME=/path/to/jdk8 ./build.sh     # build/z-afterimage-<version>.jar
+JAVA8_HOME=/path/to/jdk8 ./build.sh     # build/z-keystone-<version>.jar
+JAVA8_HOME=/path/to/jdk8 ./test.sh      # unit tests in src/test/java
 ```
 
 `tools/analyze_quads.py [samples dir]` measures how compressible captured geometry is,
@@ -134,4 +288,7 @@ JAVA8_HOME=/path/to/jdk8 ./build.sh     # build/z-afterimage-<version>.jar
 
 ## Requirements
 
-Minecraft 1.12.2, Forge 14.23.5.x, MixinBooter 10.x, OpenGL 3.1. Client only.
+Minecraft 1.12.2, Forge 14.23.5.2860, MixinBooter 10.x; OpenGL 3.1 for Afterimage.
+
+Optional, each with its own fixes (tested versions): LittleTiles 1.5.14 with CreativeCore 1.10.61, Chisels & Bits
+14.33, UniversalModCore 1.1.4, OnlinePictureFrame 1.5.0, Immersive Vehicles, JourneyMap 5.7.1.
