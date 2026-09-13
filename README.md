@@ -247,6 +247,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dafterimage.farBudgetMB` | 8192 | VRAM for far-zone copies, farthest evicted first |
 | `-Dafterimage.lowVramMB` | 1536 | free VRAM (NVIDIA cards report it) below which the budget shrinks by the shortfall, never below `farMinBudgetMB` (1024) |
 | `-Dafterimage.highVramMB` | 2560 | free VRAM above which it grows back, 256 MB per check |
+| `-Dafterimage.diskCapMB` | 8192 | disk cache size above which the files least recently written are removed at join |
 | `-Dafterimage.lowFreeMB` | 4096 | same, on available RAM, only where copies are not immutable (no ARB_buffer_storage) |
 | `-Dafterimage.highFreeMB` | 6144 | |
 | `-Dafterimage.farPlane` | 8192 | far clipping plane used for the far zone, in blocks |

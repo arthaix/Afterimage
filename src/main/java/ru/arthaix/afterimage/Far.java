@@ -640,8 +640,17 @@ public final class Far {
                     }
                 }
             }
+            {
+                double dx = en.x + 8 - camX;
+                double dy = en.y + 8 - camY;
+                double dz = en.z + 8 - camZ;
+                en.dist2 = dx * dx + dy * dy + dz * dz;
+            }
             VISIBLE.add(en);
         }
+        // nearest first: the depth test then rejects most fragments of the sections behind (HashMap order drew them in
+        // random order, so a far section was often fully shaded before a near one covered it)
+        Collections.sort(VISIBLE, (a, b) -> Double.compare(a.dist2, b.dist2));
         if (!REFRESH.isEmpty()) {
             for (int i = 0, n = REFRESH.size(); i < n; i++) {
                 capture(REFRESH.get(i), false);

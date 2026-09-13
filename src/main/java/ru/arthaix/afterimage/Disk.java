@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -777,6 +778,7 @@ public final class Disk {
                     }
                 }
             }
+            pruneOverCap(metas);
             for (Meta m : metas) {
                 double dx = m.x + 8 - px;
                 double dy = m.y + 8 - py;
@@ -821,6 +823,45 @@ public final class Disk {
             status = "load error";
             Capture.logError("disk.load", t);
         }
+    }
+
+    /** The cache has no natural bound: every section ever seen stays. Above -Dafterimage.diskCapMB (8192) the files
+     * least recently written go, down to nine tenths of the cap, before loading starts (loader thread, at join). */
+    private static final long DISK_CAP = Long.getLong("afterimage.diskCapMB", 8192L) << 20;
+    private static final java.util.concurrent.atomic.AtomicLong PRUNED_FILES = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong PRUNED_BYTES = new java.util.concurrent.atomic.AtomicLong();
+
+    private static void pruneOverCap(List<Meta> metas) {
+        if (DISK_CAP <= 0) {
+            return;
+        }
+        long total = 0L;
+        for (Meta m : metas) {
+            total += m.file.length();
+        }
+        if (total <= DISK_CAP) {
+            return;
+        }
+        List<Meta> byAge = new ArrayList<Meta>(metas);
+        Collections.sort(byAge, (a, b) -> Long.compare(a.file.lastModified(), b.file.lastModified()));
+        long target = DISK_CAP - DISK_CAP / 10;
+        java.util.Set<Meta> gone = new java.util.HashSet<Meta>();
+        for (Meta m : byAge) {
+            if (total <= target) {
+                break;
+            }
+            long len = m.file.length();
+            long sk = m.key * 4 + m.layer;
+            ONDISK.remove(sk);
+            ONDISK_TIME.remove(sk);
+            if (m.file.delete()) {
+                total -= len;
+                gone.add(m);
+                PRUNED_FILES.incrementAndGet();
+                PRUNED_BYTES.addAndGet(len);
+            }
+        }
+        metas.removeAll(gone);
     }
 
     private static final java.util.concurrent.atomic.AtomicInteger READ_ERRORS_LOGGED = new java.util.concurrent.atomic.AtomicInteger();
@@ -881,10 +922,27 @@ public final class Disk {
      * Loader thread. Sizes come from the header of the file as opened here: the writer may have replaced the file with
      * a newer version since the scan read its header, and the scanned sizes then no longer match the body.
      */
+    /** A file whose body cannot be read is deleted and forgotten; the next upload of that section writes it anew. */
+    private static void discardCorrupt(Meta m, String why) {
+        readError(why, m.file, null);
+        try {
+            long sk = m.key * 4 + m.layer;
+            ONDISK.remove(sk);
+            ONDISK_TIME.remove(sk);
+            if (m.file.delete()) {
+                CORRUPT_DELETED.incrementAndGet();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicLong CORRUPT_DELETED = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong SUPERSEDED = new java.util.concurrent.atomic.AtomicLong();
+
     private static ByteBuffer readBody(Meta m) {
         try (FileInputStream in = new FileInputStream(m.file)) {
             if (!readFully(in, READ_HEADER, m.headerLen)) {
-                readError("short header", m.file, null);
+                discardCorrupt(m, "short header");
                 return null;
             }
             ByteBuffer h = ByteBuffer.wrap(READ_HEADER, 0, m.headerLen);
@@ -895,14 +953,14 @@ public final class Disk {
             int raw = h.getInt(28);
             int comp = h.getInt(m.headerLen - 4);
             if (raw <= 0 || raw % (VS * 4) != 0 || comp <= 0) {
-                readError("bad sizes " + raw + "/" + comp, m.file, null);
+                discardCorrupt(m, "bad sizes " + raw + "/" + comp);
                 return null;
             }
             if (readComp.length < comp) {
                 readComp = new byte[comp + (comp >> 2)];
             }
             if (!readFully(in, readComp, comp)) {
-                readError("short body", m.file, null);
+                discardCorrupt(m, "short body");
                 return null;
             }
             if (readRaw.length < raw) {
@@ -919,13 +977,20 @@ public final class Disk {
                 off += k;
             }
             if (off != raw) {
-                readError("inflate " + off + "/" + raw, m.file, null);
+                discardCorrupt(m, "inflate " + off + "/" + raw);
                 return null;
             }
             ByteBuffer bb = DirectPool.acquire(raw);
             bb.put(readRaw, 0, raw);
             bb.flip();
             return bb;
+        } catch (java.io.FileNotFoundException e) {
+            // deleted or replaced by the writer since the scan (an invalidation, a newer upload): nothing to report
+            SUPERSEDED.incrementAndGet();
+            return null;
+        } catch (java.util.zip.DataFormatException e) {
+            discardCorrupt(m, "corrupt body");
+            return null;
         } catch (Throwable t) {
             readError("body", m.file, t);
             return null;
@@ -999,6 +1064,6 @@ public final class Disk {
             + "), deleted " + DELETED.get() + ", loaded " + LOADED_FILES.get() + " ("
             + String.format("%.0f MB", LOADED_RAW.get() / 1048576.0) + "), to GPU " + uploadedFromDisk + ", skipped "
             + rejectedFromDisk + ", over budget " + OVER_BUDGET.get() + ", backlog "
-            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", uploads confirmed later " + heldCommitted + ", dropped as not owned " + heldDropped + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", errors " + ERRORS.get();
+            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", uploads confirmed later " + heldCommitted + ", dropped as not owned " + heldDropped + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", superseded " + SUPERSEDED.get() + ", corrupt deleted " + CORRUPT_DELETED.get() + ", pruned " + PRUNED_FILES.get() + " (" + (PRUNED_BYTES.get() >> 20) + " MB)" + ", errors " + ERRORS.get();
     }
 }
