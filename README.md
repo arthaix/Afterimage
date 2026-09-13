@@ -81,7 +81,8 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   model caches are thread-safe (chunk worker crash).
 - **UniversalModCore** tracks its tile entities incrementally instead of scanning every loaded tile entity each tick.
 - **Render builders.** Three per chunk worker instead of ten, and builders that grew are replaced once the pool holds
-  more than 1 GB of native memory.
+  more than 1 GB of native memory. LittleTiles' direct VBO upload reuses one buffer per call site instead of allocating
+  a chunk layer's worth of direct memory for every upload and read-back.
 - **Screenshots** are written on a background thread.
 - **Immersive Vehicles** textures are decoded off the client thread; **JourneyMap** writes and decodes region images in
   the background.
@@ -267,6 +268,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | Key | Default | Meaning |
 |---|---|---|
 | `-Dltfix.hitchMs` | 50 | client frames longer than this are sampled |
+| `-Dltfix.logRotateMB` | 8 | a diagnostic log bigger than this at start-up is moved aside as `.prev` |
 | `-Dltfix.tickMs` | 150 | server ticks longer than this are sampled |
 | `-Dltfix.sampleMs` | 10 | sampling interval |
 | `-Dltfix.freezeMs` | 5000 | a server tick running longer than this is written to `ltfix-freeze.log` |

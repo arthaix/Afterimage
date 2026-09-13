@@ -66,7 +66,7 @@ public final class FrameWatch implements Runnable {
     }
 
     private static FrameWatch start(File file, String kind, long thresholdMs) {
-        FrameWatch w = new FrameWatch(file, kind, thresholdMs);
+        FrameWatch w = new FrameWatch(LogRotate.prepare(file, kind), kind, thresholdMs);
         Thread t = new Thread(w, "ltfix " + kind + " watch");
         t.setDaemon(true);
         t.setPriority(Thread.MAX_PRIORITY);

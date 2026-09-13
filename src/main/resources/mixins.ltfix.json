@@ -33,7 +33,8 @@
     "MixinLittleChunkDispatcher",
     "MixinLittleRenderChunk",
     "ChunkBlockLayerManagerAccessor",
-    "MixinRenderChunkLtCache"
+    "MixinRenderChunkLtCache",
+    "MixinRenderUploader"
   ],
   "server": []
 }

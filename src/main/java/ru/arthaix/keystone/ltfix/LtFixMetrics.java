@@ -47,7 +47,7 @@ public final class LtFixMetrics {
     private boolean reflected;
 
     public LtFixMetrics(File gameDir) {
-        this.file = new File(gameDir, "ltfix-metrics.log");
+        this.file = LogRotate.prepare(new File(gameDir, "ltfix-metrics.log"), "metrics");
     }
 
     @SubscribeEvent
@@ -82,7 +82,7 @@ public final class LtFixMetrics {
             write("client fps " + Math.round(this.frames / seconds) + " frames>50ms " + this.frames50 + " >250ms " + this.frames250
                 + " >1s " + this.frames1000 + " worst " + this.worstFrame / MS + "ms deferredTileChunks " + deferred()
                 + " ltRenderQueue " + ltQueued() + " ltRetries " + RenderRetry.retries() + " ltDropped " + RenderJobs.dropped()
-                + " directMB " + directMb() + " " + builders() + " " + GeometryPacker.stats() + " " + TileBuilders.stats() + " " + LtPreparse.stats() + " " + RegionPrewarm.stats() + " "
+                + " directMB " + directMb() + " " + builders() + " " + GeometryPacker.stats() + " " + TileBuilders.stats() + " " + DirectScratch.stats() + " " + LtPreparse.stats() + " " + RegionPrewarm.stats() + " "
                 + LtRenderScan.last());
             LtRenderScan.request();
             this.frameWindow = now;
