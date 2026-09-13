@@ -33,10 +33,19 @@ public abstract class MixinNetHandlerPlayClient {
 
     @Shadow private WorldClient field_147300_g;
 
-    /** handleChunkData: a re-sent chunk must not be preceded by stale deferred tags. */
+    /**
+     * handleChunkData: a re-sent chunk must not be preceded by stale deferred tags. A tag-only packet (not a full chunk,
+     * no sections: the rest of a chunk too big for one packet, see ChunkPacketSplitter) only queues its tags behind the
+     * chunk's pending ones; there are no blocks to read and nothing to re-render.
+     */
     @Inject(method = "func_147263_a(Lnet/minecraft/network/play/server/SPacketChunkData;)V",
-            at = @At(value = "INVOKE", target = THREAD_CHECK, shift = At.Shift.AFTER))
+            at = @At(value = "INVOKE", target = THREAD_CHECK, shift = At.Shift.AFTER), cancellable = true)
     private void packetbudget$beforeChunkData(SPacketChunkData packet, CallbackInfo ci) {
+        if (!packet.func_149274_i() && packet.func_149276_g() == 0) {
+            DeferredTiles.enqueue(this.field_147300_g, packet.func_149273_e(), packet.func_149271_f(), packet.func_189554_f());
+            ci.cancel();
+            return;
+        }
         DeferredTiles.flushChunk(packet.func_149273_e(), packet.func_149271_f());
     }
 

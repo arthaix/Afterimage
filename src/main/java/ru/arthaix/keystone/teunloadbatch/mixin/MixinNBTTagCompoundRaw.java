@@ -40,6 +40,11 @@ public abstract class MixinNBTTagCompoundRaw implements RawCompound {
     }
 
     @Override
+    public byte[] teunloadbatch$raw() {
+        return this.teunloadbatch$raw;
+    }
+
+    @Override
     public void teunloadbatch$writeBody(DataOutput out) throws IOException {
         this.func_74734_a(out);
     }

@@ -11,6 +11,8 @@
     "MixinChunkProviderServer",
     "MixinWorldTicking",
     "MixinPlayerChunkMapSend",
-    "MixinMovementCheck"
+    "MixinMovementCheck",
+    "MixinNetworkManagerSplit",
+    "SPacketChunkDataAccessor"
   ]
 }

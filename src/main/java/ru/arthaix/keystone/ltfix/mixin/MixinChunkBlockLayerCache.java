@@ -11,6 +11,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import com.creativemd.littletiles.client.render.cache.IRenderDataCache;
 
+import ru.arthaix.keystone.ltfix.GeometryPacker;
+import ru.arthaix.keystone.ltfix.PackableLink;
+
 /**
  * 1. discard: a chunk upload that was replaced before it reached the GPU unlinked its tile entities from their geometry,
  *    so tiles not included in the replacing upload lost their only copy and stayed invisible. Their last geometry is
@@ -33,6 +36,13 @@ public abstract class MixinChunkBlockLayerCache {
     @Redirect(method = "add", at = @At(value = "INVOKE", target = "Lcom/creativemd/littletiles/client/render/cache/IRenderDataCache;byteBuffer()Ljava/nio/ByteBuffer;"))
     private ByteBuffer ltfix$ownView(IRenderDataCache data) {
         ByteBuffer b = data.byteBuffer();
-        return b == null ? null : b.duplicate().order(b.order());
+        if (b == null) {
+            return null;
+        }
+        // the link BlockRenderCache makes from this view next shares the bytes and takes over their count
+        if (data instanceof PackableLink) {
+            GeometryPacker.offerInheritance((PackableLink) data, b);
+        }
+        return b.duplicate().order(b.order());
     }
 }

@@ -109,7 +109,8 @@ public final class LtRenderScan {
             boolean any = false;
             for (int i = 0; i < 4 && !any; i++) {
                 IRenderDataCache d = cache.get(i);
-                any = d != null && d.byteBuffer() != null;
+                // a packed link must not be unpacked just to be counted
+                any = d != null && (d instanceof PackableLink ? ((PackableLink) d).ltfix$hasGeometry() : d.byteBuffer() != null);
             }
             if (any) {
                 continue;

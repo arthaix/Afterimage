@@ -28,7 +28,9 @@
     "MixinJmRegionImageCache",
     "MixinJmTextureImpl",
     "MixinJmRegionImageHandler",
-    "MixinLittleNBTCompressionTools"
+    "MixinLittleNBTCompressionTools",
+    "MixinLayeredRenderBufferCache",
+    "MixinLittleChunkDispatcher"
   ],
   "server": []
 }

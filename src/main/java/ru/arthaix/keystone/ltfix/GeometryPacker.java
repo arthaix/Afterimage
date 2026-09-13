@@ -13,31 +13,43 @@ import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 /**
- * The tile geometry LittleTiles keeps for the next rebuild of a chunk (MixinBufferLink) sat in direct memory: about
- * 100 KB per loaded tile entity, 10 GB after a flight over the city, which pushed the whole machine into the page file.
- * A link whose geometry has not been read for -Dltfix.packAfterMs (3 s) is deflated (level 1, about 5x on vertex data)
- * into a heap array by -Dltfix.packThreads (2) background threads and its direct buffer is dropped. The next read (a
- * chunk worker merging the section, or LittleTiles combining structures) inflates it into a new direct buffer.
- * The bytes a reader gets are identical; -Dltfix.pack=false keeps everything raw.
+ * The tile geometry LittleTiles keeps for the next rebuild of a chunk (MixinBufferLink), about 100 KB per loaded tile
+ * entity.
  *
- * A dropped direct buffer only returns its native memory when the collector finds it unreachable, which on a large old
- * generation can take minutes. After -Dltfix.packGcMB (1024) of dropped geometry the packer asks for a collection with
- * System.gc(), but only where that starts a concurrent cycle (-XX:+ExplicitGCInvokesConcurrent, or Shenandoah) and at
- * most every 10 s; otherwise it never calls it.
+ * 1. Heap, not direct memory. A kept copy used to be a direct buffer, and a direct buffer only returns its native memory
+ *    when the collector finds it unreachable, which for buffers old enough to sit in the old generation waits for a
+ *    marking cycle. Rebuilding a big import in view dropped buffers faster than that: direct memory reached its limit
+ *    (32 GB) and the game crashed with "OutOfMemoryError: Direct buffer memory" after a 19 s stall in the JDK's own
+ *    System.gc(). A new link now copies its bytes into a heap array (MixinBufferLink); the collector sees heap garbage
+ *    and heap pressure as they are, and nothing is ever freed by hand. -Dltfix.pack=false keeps the old direct buffers.
+ * 2. Packing. A link whose geometry has not been read for -Dltfix.packAfterMs (30 s) is deflated (level 1, about 5x on
+ *    vertex data) by -Dltfix.packThreads (2) background threads; the next read inflates it again. Readers get identical
+ *    bytes.
+ * 3. A budget. Unpacked geometry is counted per link (a rebuild's new link inherits the count of the link it was made
+ *    from, a link replaced or emptied in its tile entity gives its count back). Above -Dltfix.rawBudgetMB (an eighth of
+ *    the heap) the packers stop waiting for due times and pack every link idle for -Dltfix.packPressureIdleMs (1000);
+ *    above -Dltfix.rawHardMB (a fifth of the heap) chunk worker threads wait up to 2 s before merging more tiles.
  */
 public final class GeometryPacker {
     public static final boolean ENABLED = !"false".equals(System.getProperty("ltfix.pack"));
     public static final int MIN_BYTES = 8192;
     /** 3 s packed and unpacked the same geometry over and over (LittleTiles rebuilds its sections every few seconds). */
     private static final long PACK_AFTER = Long.getLong("ltfix.packAfterMs", 30_000L) * 1_000_000L;
+    private static final long PRESSURE_IDLE = Long.getLong("ltfix.packPressureIdleMs", 1_000L) * 1_000_000L;
     private static final int THREADS = Math.max(1, Integer.getInteger("ltfix.packThreads", 2));
+    private static final long HEAP_MB = Runtime.getRuntime().maxMemory() >> 20;
+    private static final long RAW_BUDGET = Long.getLong("ltfix.rawBudgetMB", Math.max(512L, HEAP_MB / 8)) << 20;
+    private static final long RAW_HARD = Math.max(RAW_BUDGET, Long.getLong("ltfix.rawHardMB", Math.max(1024L, HEAP_MB / 5)) << 20);
     private static final long GC_AFTER_BYTES = Long.getLong("ltfix.packGcMB", 1024L) << 20;
     private static final long GC_INTERVAL_NANOS = 10_000_000_000L;
     private static final int CHUNK = 1 << 16;
 
     private static final class Tracked {
         final WeakReference<PackableLink> link;
-        final long due;
+        volatile long due;
+        /** heap bytes of unpacked geometry this link is counted for */
+        final AtomicLong raw = new AtomicLong();
+        volatile boolean released;
 
         Tracked(PackableLink link, long due) {
             this.link = new WeakReference<PackableLink>(link);
@@ -46,6 +58,14 @@ public final class GeometryPacker {
     }
 
     private static final ConcurrentLinkedQueue<Tracked> QUEUE = new ConcurrentLinkedQueue<Tracked>();
+    private static final AtomicLong RAW = new AtomicLong();
+    private static final AtomicLong RAW_PEAK = new AtomicLong();
+    private static final AtomicLong HEAP_COPIES = new AtomicLong();
+    private static final AtomicLong HEAP_COPY_BYTES = new AtomicLong();
+    private static final AtomicLong PRESSURE_PACKS = new AtomicLong();
+    private static final AtomicLong STALLS = new AtomicLong();
+    private static final AtomicLong STALL_NANOS = new AtomicLong();
+    private static final AtomicLong DIRECT_RETRIES = new AtomicLong();
     private static final AtomicLong PACKS = new AtomicLong();
     private static final AtomicLong PACK_RAW = new AtomicLong();
     private static final AtomicLong PACK_OUT = new AtomicLong();
@@ -58,28 +78,141 @@ public final class GeometryPacker {
     private static final AtomicLong DROPPED_SINCE_GC = new AtomicLong();
     private static final AtomicLong GC_REQUESTS = new AtomicLong();
     private static final ThreadLocal<Inflater> INFLATER = ThreadLocal.withInitial(Inflater::new);
-    private static final ThreadLocal<byte[]> SCRATCH = ThreadLocal.withInitial(() -> new byte[CHUNK]);
+    /** the link a chunk worker just read in ChunkBlockLayerCache.add, and the array its bytes are in */
+    private static final ThreadLocal<Object[]> INHERIT = new ThreadLocal<Object[]>();
     private static volatile boolean started;
     private static volatile boolean broken;
     private static volatile long lastGcRequest;
+    private static volatile long lastShortageGc;
     private static Boolean concurrentExplicitGc;
 
     private GeometryPacker() {
     }
 
-    /** A link was created (any thread). */
-    public static void track(PackableLink link) {
+    public static boolean active() {
+        return ENABLED && !broken;
+    }
+
+    /** A link of at least MIN_BYTES was created holding raw bytes of unpacked geometry (any thread); its token. */
+    public static Object track(PackableLink link, long raw) {
         if (!ENABLED || broken) {
-            return;
+            return null;
         }
         if (!started) {
             start();
         }
-        QUEUE.add(new Tracked(link, System.nanoTime() + PACK_AFTER));
+        Tracked t = new Tracked(link, System.nanoTime() + PACK_AFTER);
+        setRaw(t, raw);
+        QUEUE.add(t);
+        return t;
     }
 
-    public static boolean active() {
-        return ENABLED && !broken;
+    /** The number of unpacked heap bytes a link holds now (0 once packed). */
+    public static void setRaw(Object token, long raw) {
+        if (!(token instanceof Tracked)) {
+            return;
+        }
+        Tracked t = (Tracked) token;
+        if (t.released && raw > 0) {
+            return;
+        }
+        long now = RAW.addAndGet(raw - t.raw.getAndSet(raw));
+        long peak;
+        while (now > (peak = RAW_PEAK.get()) && !RAW_PEAK.compareAndSet(peak, now)) {
+        }
+    }
+
+    /** The link is no longer its tile entity's geometry (replaced or emptied): it is not counted or packed any more. */
+    public static void release(Object token) {
+        if (token instanceof Tracked) {
+            Tracked t = (Tracked) token;
+            setRaw(t, 0L);
+            t.released = true;
+        }
+    }
+
+    /** ChunkBlockLayerCache.add read this link's buffer; a link made from it next on this thread takes over its count. */
+    public static void offerInheritance(PackableLink from, ByteBuffer buffer) {
+        if (buffer != null && buffer.hasArray()) {
+            INHERIT.set(new Object[] {from, buffer.array()});
+        } else {
+            INHERIT.remove();
+        }
+    }
+
+    /** A new link with this buffer: the link it shares its bytes with, if that was the one just read on this thread. */
+    public static PackableLink takeInheritance(ByteBuffer buffer) {
+        Object[] offer = INHERIT.get();
+        if (offer == null) {
+            return null;
+        }
+        INHERIT.remove();
+        return buffer.hasArray() && buffer.array() == offer[1] ? (PackableLink) offer[0] : null;
+    }
+
+    public static void inherit(Object fromToken, Object toToken) {
+        if (fromToken instanceof Tracked && toToken instanceof Tracked) {
+            Tracked from = (Tracked) fromToken;
+            Tracked to = (Tracked) toToken;
+            long raw = from.raw.getAndSet(0L);
+            from.released = true;
+            if (raw > 0) {
+                to.raw.addAndGet(raw);
+            }
+        }
+    }
+
+    /** Bytes 0..length of a direct buffer as a native-order heap buffer (position 0, limit length); else src itself. */
+    public static ByteBuffer heapCopy(ByteBuffer src, int length) {
+        if (src == null || !src.isDirect() || length < 0 || src.capacity() < length) {
+            return src;
+        }
+        try {
+            ByteBuffer view = src.duplicate();
+            view.clear();
+            view.limit(length);
+            byte[] bytes = new byte[length];
+            view.get(bytes);
+            HEAP_COPIES.incrementAndGet();
+            HEAP_COPY_BYTES.addAndGet(length);
+            return ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+        } catch (OutOfMemoryError e) {
+            return src;
+        }
+    }
+
+    /** Chunk worker, before merging a section's tiles: while unpacked geometry is over the hard limit, wait up to 2 s. */
+    public static void waitForRoom() {
+        if (!ENABLED || broken || RAW.get() <= RAW_HARD) {
+            return;
+        }
+        long start = System.nanoTime();
+        long deadline = start + 2_000_000_000L;
+        STALLS.incrementAndGet();
+        try {
+            while (RAW.get() > RAW_HARD && System.nanoTime() < deadline) {
+                Thread.sleep(25L);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        STALL_NANOS.addAndGet(System.nanoTime() - start);
+    }
+
+    /** A direct allocation for a chunk failed: ask for a concurrent collection (at most every 5 s) and wait a moment. */
+    public static void onDirectShortage() {
+        DIRECT_RETRIES.incrementAndGet();
+        long now = System.nanoTime();
+        if (now - lastShortageGc > 5_000_000_000L && concurrentExplicitGc()) {
+            lastShortageGc = now;
+            GC_REQUESTS.incrementAndGet();
+            System.gc();
+        }
+        try {
+            Thread.sleep(250L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static synchronized void start() {
@@ -99,31 +232,44 @@ public final class GeometryPacker {
         Deflater deflater = new Deflater(Deflater.BEST_SPEED);
         byte[] in = new byte[CHUNK];
         byte[] out = new byte[CHUNK];
+        int requeued = 0;
         while (true) {
             try {
                 Tracked t = QUEUE.poll();
                 if (t == null) {
                     requestCollectionIfDue();
-                    Thread.sleep(500L);
+                    Thread.sleep(250L);
+                    continue;
+                }
+                PackableLink link = t.link.get();
+                if (link == null || t.released) {
+                    // collected, or no longer its tile entity's geometry: whatever it was counted for is gone
+                    setRaw(t, 0L);
                     continue;
                 }
                 long now = System.nanoTime();
-                if (t.due > now) {
+                boolean pressure = RAW.get() > RAW_BUDGET;
+                if (!pressure && t.due > now) {
                     QUEUE.add(t);
                     requestCollectionIfDue();
                     Thread.sleep(Math.min(250L, Math.max(10L, (t.due - now) / 1_000_000L)));
                     continue;
                 }
-                PackableLink link = t.link.get();
-                if (link == null) {
-                    continue;
-                }
                 long touched = link.ltfix$touched();
-                if (now - touched < PACK_AFTER) {
-                    QUEUE.add(new Tracked(link, touched + PACK_AFTER));
+                if (now - touched < (pressure ? PRESSURE_IDLE : PACK_AFTER)) {
+                    t.due = touched + PACK_AFTER;
+                    QUEUE.add(t);
+                    if (pressure && ++requeued > QUEUE.size() + 16) {
+                        // every link left is in use right now
+                        requeued = 0;
+                        Thread.sleep(20L);
+                    }
                     continue;
                 }
-                link.ltfix$pack(deflater, in, out);
+                requeued = 0;
+                if (link.ltfix$pack(deflater, in, out) && pressure) {
+                    PRESSURE_PACKS.incrementAndGet();
+                }
                 requestCollectionIfDue();
             } catch (InterruptedException e) {
                 return;
@@ -134,10 +280,8 @@ public final class GeometryPacker {
     }
 
     /**
-     * Geometry of chunks the player left is garbage at once, but its native memory only comes back when a collection
-     * finds the buffers unreachable; they sit in the old generation, so that waited for the next marking cycle and direct
-     * memory reached 14.8 GB in a flight. Above -Dltfix.directGcMB (6144) of direct memory a concurrent cycle is asked
-     * for every 20 s at most.
+     * Chunk builders and LittleTiles' own render buffers are still direct memory, freed by the collector. Above
+     * -Dltfix.directGcMB (6144) of direct memory a concurrent cycle is asked for every 20 s at most.
      */
     private static final long DIRECT_GC_BYTES = Long.getLong("ltfix.directGcMB", 6144L) << 20;
     private static final long DIRECT_GC_INTERVAL_NANOS = 20_000_000_000L;
@@ -238,8 +382,9 @@ public final class GeometryPacker {
         return Arrays.copyOf(acc, size);
     }
 
-    /** A link now holds its geometry packed; its direct buffer was dropped. */
-    public static void onPacked(int raw, int packed, long nanos) {
+    /** A link now holds its geometry packed; its unpacked bytes were dropped. */
+    public static void onPacked(Object token, int raw, int packed, long nanos) {
+        setRaw(token, 0L);
         PACKS.incrementAndGet();
         PACK_RAW.addAndGet(raw);
         PACK_OUT.addAndGet(packed);
@@ -247,38 +392,37 @@ public final class GeometryPacker {
         DROPPED_SINCE_GC.addAndGet(raw);
     }
 
-    /** Inflates a packed link into a new native-order direct buffer, position 0 and limit length. */
+    /** Inflates a packed link into a new native-order heap buffer, position 0 and limit length. */
     public static ByteBuffer inflate(byte[] packed, int length) {
         long t0 = System.nanoTime();
         Inflater inf = INFLATER.get();
-        byte[] scratch = SCRATCH.get();
         inf.reset();
         inf.setInput(packed);
-        ByteBuffer dst = ByteBuffer.allocateDirect(length).order(ByteOrder.nativeOrder());
+        byte[] bytes = new byte[length];
+        int filled = 0;
         try {
-            while (dst.hasRemaining()) {
-                int n = inf.inflate(scratch, 0, Math.min(scratch.length, dst.remaining()));
+            while (filled < length) {
+                int n = inf.inflate(bytes, filled, length - filled);
                 if (n == 0 && (inf.finished() || inf.needsInput() || inf.needsDictionary())) {
                     break;
                 }
-                dst.put(scratch, 0, n);
+                filled += n;
             }
         } catch (DataFormatException e) {
             broken = true;
             FAILURES.incrementAndGet();
             throw new IllegalStateException("ltfix: packed tile geometry is corrupt", e);
         }
-        if (dst.hasRemaining()) {
+        if (filled < length) {
             broken = true;
             FAILURES.incrementAndGet();
-            throw new IllegalStateException("ltfix: packed tile geometry is short: " + dst.position() + " of " + length);
+            throw new IllegalStateException("ltfix: packed tile geometry is short: " + filled + " of " + length);
         }
-        dst.flip();
         UNPACKS.incrementAndGet();
         UNPACK_RAW.addAndGet(length);
         UNPACK_OUT.addAndGet(packed.length);
         UNPACK_NANOS.addAndGet(System.nanoTime() - t0);
-        return dst;
+        return ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
     }
 
     public static String stats() {
@@ -289,6 +433,9 @@ public final class GeometryPacker {
         long heldPacked = (PACK_OUT.get() - UNPACK_OUT.get()) >> 20;
         return "pack " + PACKS.get() + " " + held + "MB->" + heldPacked + "MB " + (PACK_NANOS.get() / 1_000_000L) + "ms unpack " + UNPACKS.get()
             + " " + (UNPACK_RAW.get() >> 20) + "MB " + (UNPACK_NANOS.get() / 1_000_000L) + "ms queue " + QUEUE.size() + " gc " + GC_REQUESTS.get()
+            + " raw " + (RAW.get() >> 20) + "/" + (RAW_BUDGET >> 20) + "MB peak " + (RAW_PEAK.get() >> 20) + "MB heapCopies " + HEAP_COPIES.get()
+            + " " + (HEAP_COPY_BYTES.get() >> 20) + "MB pressurePacks " + PRESSURE_PACKS.get() + " stalls " + STALLS.get() + " "
+            + (STALL_NANOS.get() / 1_000_000L) + "ms directRetries " + DIRECT_RETRIES.get()
             + (FAILURES.get() > 0 ? " FAILURES " + FAILURES.get() : "") + (broken ? " BROKEN" : "");
     }
 }

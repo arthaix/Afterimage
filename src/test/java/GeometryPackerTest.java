@@ -50,6 +50,27 @@ public class GeometryPackerTest {
                 throw new AssertionError("partial length differs at " + i);
             }
         }
+        // kept copies move to the heap: same bytes, native order, only length bytes
+        ByteBuffer heap = GeometryPacker.heapCopy(big, 150_000);
+        if (heap.isDirect() || heap.position() != 0 || heap.limit() != 150_000 || heap.capacity() != 150_000
+            || heap.order() != ByteOrder.nativeOrder()) {
+            throw new AssertionError("bad heap copy " + heap);
+        }
+        for (int i = 0; i < 150_000; i++) {
+            if (heap.get(i) != big.get(i)) {
+                throw new AssertionError("heap copy differs at " + i);
+            }
+        }
+        if (GeometryPacker.heapCopy(heap, 150_000) != heap || GeometryPacker.heapCopy(big, 300_000) != big) {
+            throw new AssertionError("a heap buffer or a too short buffer was copied");
+        }
+        byte[] heapPacked = GeometryPacker.deflate(heap.duplicate().order(heap.order()), 150_000, d, in, out);
+        ByteBuffer heapBack = GeometryPacker.inflate(heapPacked, 150_000);
+        for (int i = 0; i < 150_000; i++) {
+            if (heapBack.get(i) != big.get(i)) {
+                throw new AssertionError("heap round trip differs at " + i);
+            }
+        }
         ByteBuffer noise = ByteBuffer.allocateDirect(1 << 20);
         byte[] b = new byte[1 << 20];
         r.nextBytes(b);

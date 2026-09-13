@@ -46,6 +46,9 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   enter view all at once (login, teleport) are sent nearest first over the following ticks.
 - **City preload.** Chunks listed in `config/chunkkeep-pins.txt` (one `chunkX chunkZ` pair per line, `#` starts a
   comment) are loaded at start through Forge's async chunk IO, paced by tick time, and stay loaded.
+- **Huge chunks reach the player.** A chunk packet over 2 MB (a model imported at hundreds of LittleTiles tiles per
+  block) disconnected the player with "unable to fit ... into 3" every time they came near. It is now sent as the
+  chunk followed by packets with the rest of its tile entities, written together so nothing gets between them.
 - **Builders fly.** Creative and spectator players are not pulled back by "moved too quickly".
 - **No kick** with "Internal server error" when a modded entity has no bounding box yet.
 - **LittleTiles loading** splits tile group NBT in linear time (it was quadratic, 29% of chunk loading on dense builds)
@@ -60,6 +63,10 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   buffer, which made tiles disappear or show another chunk's bytes. Geometry not drawn for 30 s is packed until it is
   needed again. Tiles whose data arrives after their chunk was built are rendered again, and the rendering thread no
   longer spins and floods the log on tiles without data.
+- **No "Direct buffer memory" crashes.** The kept geometry lives in the Java heap, not in direct memory, which the game
+  only got back once the collector reached it: rebuilding a big import in view filled it and crashed the game. Unpacked
+  geometry has a budget (an eighth of the heap); above it everything not in use right now is packed at once, and above
+  a fifth chunk workers wait briefly. A chunk buffer allocation that still fails is retried for up to 10 s.
 - **Packet budget.** The scheduled-task queue, chunk packets included, runs for at most 10 ms per frame, and the tile
   entity tags of a chunk are applied 4 ms per frame. Nothing is dropped or reordered.
 - **Chisels & Bits baking** filters each voxel blob once per state and layer instead of seven times per block, and its
@@ -188,6 +195,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dchunkkeep.preloadMaxInFlight` | 32 | most pinned chunks loading at once |
 | `-Dchunkkeep.preloadIoThreads` | cores / 3, 2 to 8 | chunk IO threads during preload |
 | `-Dchunkkeep.skipSpeedCheckForBuilders` | true | creative and spectator players skip "moved too quickly" |
+| `-Dchunkkeep.packetBytes` | 1900000 | uncompressed size above which a chunk packet is split |
 
 ### Client
 
@@ -195,9 +203,12 @@ Everything works with the defaults; these are for tuning and for turning a part 
 |---|---|---|
 | `-Dltfix.preparse` | true | parse LittleTiles data from chunk packets in the background |
 | `-Dltfix.preparseThreads` | 3 | threads for that |
-| `-Dltfix.pack` | true | pack LittleTiles geometry that has not been drawn for a while |
+| `-Dltfix.pack` | true | keep LittleTiles geometry in the heap and pack what has not been drawn for a while; false keeps it raw in direct memory |
 | `-Dltfix.packAfterMs` | 30000 | time without drawing before geometry is packed |
 | `-Dltfix.packThreads` | 2 | packing threads |
+| `-Dltfix.rawBudgetMB` | heap / 8 | unpacked geometry above which everything idle for `packPressureIdleMs` is packed at once |
+| `-Dltfix.rawHardMB` | heap / 5 | unpacked geometry above which chunk workers wait (up to 2 s) before merging more tiles |
+| `-Dltfix.packPressureIdleMs` | 1000 | idle time that is enough to pack while over the budget |
 | `-Dltfix.packGcMB` | 1024 | freed geometry after which a concurrent GC cycle is requested (only with `-XX:+ExplicitGCInvokesConcurrent` or Shenandoah) |
 | `-Dltfix.directGcMB` | 6144 | direct memory above which such a cycle is requested |
 | `-Dltfix.renderOnRead` | true | render tiles again whose data arrives after their chunk was built |

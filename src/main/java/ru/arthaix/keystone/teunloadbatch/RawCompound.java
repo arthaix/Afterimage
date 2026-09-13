@@ -8,6 +8,9 @@ public interface RawCompound {
     /** Body bytes (entries and the end tag) this compound writes instead of its own entries. */
     void teunloadbatch$setRaw(byte[] body);
 
+    /** The body bytes set by TagCache, or null for an ordinary compound. */
+    byte[] teunloadbatch$raw();
+
     /** Writes the compound's entries and end tag, as NBTTagCompound.write does. */
     void teunloadbatch$writeBody(DataOutput out) throws IOException;
 }
