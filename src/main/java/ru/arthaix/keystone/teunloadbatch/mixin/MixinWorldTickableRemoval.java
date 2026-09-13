@@ -40,6 +40,10 @@ public abstract class MixinWorldTickableRemoval {
               slice = @Slice(from = @At(value = "FIELD", target = "Lnet/minecraft/world/World;field_175730_i:Ljava/util/List;", opcode = 180)),
               at = @At(value = "INVOKE", target = "Ljava/util/List;remove(Ljava/lang/Object;)Z", ordinal = 0))
     private boolean teunloadbatch$removeTickableLater(List<TileEntity> list, Object te) {
+        if (!(te instanceof net.minecraft.util.ITickable)) {
+            // never in the tickable list (World.addTileEntity adds ITickable ones only): nothing to remove or scan for
+            return false;
+        }
         if (list instanceof DeferredRemovalList) {
             ((DeferredRemovalList<?>) list).removeLater(te);
             return true;

@@ -23,6 +23,9 @@ public final class RenderRetry {
     });
     private static final AtomicLong RETRIES = new AtomicLong();
     private static volatile long lastReport;
+    /** consecutive retries per job: the delay doubles each time, up to MAX_DELAY_MS */
+    private static final long MAX_DELAY_MS = Long.getLong("ltfix.retryMaxMs", 5000L);
+    private static final java.util.Map<Object, Integer> ATTEMPTS = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<Object, Integer>());
 
     private RenderRetry() {
     }
@@ -56,7 +59,11 @@ public final class RenderRetry {
                 // its chunk unloaded while the job waited: nothing will ever load it again
                 return true;
             }
-            EXEC.schedule(() -> queue.add(data), DELAY_MS, TimeUnit.MILLISECONDS);
+            Integer n = ATTEMPTS.get(data);
+            int attempt = n == null ? 0 : n;
+            ATTEMPTS.put(data, attempt + 1);
+            long delay = Math.min(MAX_DELAY_MS, DELAY_MS << Math.min(attempt, 10));
+            EXEC.schedule(() -> queue.add(data), delay, TimeUnit.MILLISECONDS);
             return true;
         }
         return queue.add(data);

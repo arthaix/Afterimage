@@ -19,8 +19,9 @@ import ru.arthaix.keystone.ltfix.PackableLink;
  * 1. BufferLink.uploaded dropped the tile entity's copy of its geometry once the chunk VBO was uploaded; LittleTiles then
  *    read it back from the VBO before the next rebuild. Any VBO that was deleted, recreated or refilled in between gave the
  *    tiles nothing (they vanished) or another chunk's bytes (stripes and artifacts). The copy is now kept in memory.
- * 2. The kept copy lives in a heap array: a link made from a direct buffer copies the bytes (see GeometryPacker for why).
- *    A link made from another link's buffer shares that array and takes over its place in the packer's count.
+ * 2. The kept copy lives in a heap array: a link made from a direct buffer copies the bytes (see GeometryPacker for why),
+ *    a link made with a fresh heap buffer (MixinLayeredRenderBufferCache) is counted as it is, and a link made from
+ *    another link's buffer shares that array and takes over its place in the packer's count.
  * 3. A kept copy nobody reads is packed by GeometryPacker. Every read of the geometry goes through byteBuffer(), which
  *    holds this link's monitor and unpacks first, so no reader sees a link while it is being packed.
  */
@@ -48,21 +49,24 @@ public abstract class MixinBufferLink implements PackableLink {
     @Inject(method = "<init>(Ljava/nio/ByteBuffer;II)V", at = @At("RETURN"))
     private void ltfix$created(ByteBuffer buffer, int length, int count, CallbackInfo ci) {
         this.ltfix$touched = System.nanoTime();
+        PackableLink from = buffer == null ? null : GeometryPacker.takeInheritance(buffer);
         if (buffer == null || !GeometryPacker.active()) {
             return;
         }
-        PackableLink from = GeometryPacker.takeInheritance(buffer);
-        boolean copied = false;
+        long raw = 0L;
         if (buffer.isDirect()) {
             ByteBuffer heap = GeometryPacker.heapCopy(buffer, length);
             if (heap != buffer) {
                 this.byteBuffer = heap;
-                copied = true;
+                raw = length;
             }
+        } else if (from == null) {
+            // a fresh heap array (a build result, a combine, a download)
+            raw = length;
         }
         if (length >= GeometryPacker.MIN_BYTES) {
-            this.ltfix$token = GeometryPacker.track(this, copied ? length : 0L);
-            if (!copied && from != null) {
+            this.ltfix$token = GeometryPacker.track(this, raw);
+            if (raw == 0L && from != null) {
                 GeometryPacker.inherit(from.ltfix$token(), this.ltfix$token);
             }
         }
@@ -93,7 +97,8 @@ public abstract class MixinBufferLink implements PackableLink {
                 try {
                     this.byteBuffer = GeometryPacker.inflate(this.ltfix$packed, this.length);
                     this.ltfix$packed = null;
-                    GeometryPacker.setRaw(this.ltfix$token, this.length);
+                    GeometryPacker.setRaw(this.ltfix$token, this.byteBuffer.isDirect() ? 0L : this.length);
+                    GeometryPacker.requeue(this.ltfix$token);
                 } catch (RuntimeException e) {
                     // never expected (deflate/inflate are exact); a missing tile beats a crashed chunk worker
                     cir.setReturnValue(null);

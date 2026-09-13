@@ -2,6 +2,7 @@ package ru.arthaix.keystone.ltfix;
 
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryUsage;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -11,6 +12,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
+
+import javax.management.NotificationEmitter;
+import javax.management.openmbean.CompositeData;
+
+import com.sun.management.GarbageCollectionNotificationInfo;
 
 /**
  * The tile geometry LittleTiles keeps for the next rebuild of a chunk (MixinBufferLink), about 100 KB per loaded tile
@@ -22,10 +28,14 @@ import java.util.zip.Inflater;
  *    (32 GB) and the game crashed with "OutOfMemoryError: Direct buffer memory" after a 19 s stall in the JDK's own
  *    System.gc(). A new link now copies its bytes into a heap array (MixinBufferLink); the collector sees heap garbage
  *    and heap pressure as they are, and nothing is ever freed by hand. -Dltfix.pack=false keeps the old direct buffers.
- * 2. Packing. A link whose geometry has not been read for -Dltfix.packAfterMs (30 s) is deflated (level 1, about 5x on
+ * 2. But not at any price. The heap also holds everything else (a big MeshTiles import on top of a rebuild storm ended in
+ *    "OutOfMemoryError: Java heap space"). The heap in use after each collection is watched: above
+ *    -Dltfix.heapPressurePercent (60) the packers work as over budget, above -Dltfix.heapTightPercent (75) new copies
+ *    and unpacked geometry stay in direct memory as before, so the heap is never filled by geometry.
+ * 3. Packing. A link whose geometry has not been read for -Dltfix.packAfterMs (30 s) is deflated (level 1, about 5x on
  *    vertex data) by -Dltfix.packThreads (2) background threads; the next read inflates it again. Readers get identical
  *    bytes.
- * 3. A budget. Unpacked geometry is counted per link (a rebuild's new link inherits the count of the link it was made
+ * 4. A budget. Unpacked geometry is counted per link (a rebuild's new link inherits the count of the link it was made
  *    from, a link replaced or emptied in its tile entity gives its count back). Above -Dltfix.rawBudgetMB (an eighth of
  *    the heap) the packers stop waiting for due times and pack every link idle for -Dltfix.packPressureIdleMs (1000);
  *    above -Dltfix.rawHardMB (a fifth of the heap) chunk worker threads wait up to 2 s before merging more tiles.
@@ -37,9 +47,12 @@ public final class GeometryPacker {
     private static final long PACK_AFTER = Long.getLong("ltfix.packAfterMs", 30_000L) * 1_000_000L;
     private static final long PRESSURE_IDLE = Long.getLong("ltfix.packPressureIdleMs", 1_000L) * 1_000_000L;
     private static final int THREADS = Math.max(1, Integer.getInteger("ltfix.packThreads", 2));
-    private static final long HEAP_MB = Runtime.getRuntime().maxMemory() >> 20;
+    private static final long HEAP_MAX = Runtime.getRuntime().maxMemory();
+    private static final long HEAP_MB = HEAP_MAX >> 20;
     private static final long RAW_BUDGET = Long.getLong("ltfix.rawBudgetMB", Math.max(512L, HEAP_MB / 8)) << 20;
     private static final long RAW_HARD = Math.max(RAW_BUDGET, Long.getLong("ltfix.rawHardMB", Math.max(1024L, HEAP_MB / 5)) << 20);
+    private static final double HEAP_PRESSURE = Integer.getInteger("ltfix.heapPressurePercent", 60) / 100.0;
+    private static final double HEAP_TIGHT = Integer.getInteger("ltfix.heapTightPercent", 75) / 100.0;
     private static final long GC_AFTER_BYTES = Long.getLong("ltfix.packGcMB", 1024L) << 20;
     private static final long GC_INTERVAL_NANOS = 10_000_000_000L;
     private static final int CHUNK = 1 << 16;
@@ -47,9 +60,11 @@ public final class GeometryPacker {
     private static final class Tracked {
         final WeakReference<PackableLink> link;
         volatile long due;
-        /** heap bytes of unpacked geometry this link is counted for */
+        /** unpacked geometry bytes this link is counted for */
         final AtomicLong raw = new AtomicLong();
         volatile boolean released;
+        /** in QUEUE (or about to be re-added by the packer that polled it) */
+        volatile boolean queued = true;
 
         Tracked(PackableLink link, long due) {
             this.link = new WeakReference<PackableLink>(link);
@@ -58,10 +73,14 @@ public final class GeometryPacker {
     }
 
     private static final ConcurrentLinkedQueue<Tracked> QUEUE = new ConcurrentLinkedQueue<Tracked>();
+    /** entries in QUEUE: ConcurrentLinkedQueue.size() walks the whole list */
+    private static final AtomicLong QUEUED = new AtomicLong();
     private static final AtomicLong RAW = new AtomicLong();
     private static final AtomicLong RAW_PEAK = new AtomicLong();
     private static final AtomicLong HEAP_COPIES = new AtomicLong();
     private static final AtomicLong HEAP_COPY_BYTES = new AtomicLong();
+    private static final AtomicLong HEAP_SKIPS = new AtomicLong();
+    private static final AtomicLong FULL_GCS = new AtomicLong();
     private static final AtomicLong PRESSURE_PACKS = new AtomicLong();
     private static final AtomicLong STALLS = new AtomicLong();
     private static final AtomicLong STALL_NANOS = new AtomicLong();
@@ -78,19 +97,85 @@ public final class GeometryPacker {
     private static final AtomicLong DROPPED_SINCE_GC = new AtomicLong();
     private static final AtomicLong GC_REQUESTS = new AtomicLong();
     private static final ThreadLocal<Inflater> INFLATER = ThreadLocal.withInitial(Inflater::new);
+    private static final ThreadLocal<byte[]> SCRATCH = ThreadLocal.withInitial(() -> new byte[CHUNK]);
     /** the link a chunk worker just read in ChunkBlockLayerCache.add, and the array its bytes are in */
     private static final ThreadLocal<Object[]> INHERIT = new ThreadLocal<Object[]>();
     private static volatile boolean started;
     private static volatile boolean broken;
     private static volatile long lastGcRequest;
     private static volatile long lastShortageGc;
+    /** heap in use right after the latest collection, as a fraction of the maximum */
+    private static volatile double heapAfterGc;
     private static Boolean concurrentExplicitGc;
+
+    static {
+        watchCollections();
+    }
 
     private GeometryPacker() {
     }
 
     public static boolean active() {
         return ENABLED && !broken;
+    }
+
+    private static void watchCollections() {
+        try {
+            for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
+                if (!(gc instanceof NotificationEmitter)) {
+                    continue;
+                }
+                ((NotificationEmitter) gc).addNotificationListener((notification, handback) -> {
+                    if (!GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION.equals(notification.getType())) {
+                        return;
+                    }
+                    GarbageCollectionNotificationInfo info = GarbageCollectionNotificationInfo.from((CompositeData) notification.getUserData());
+                    long used = 0L;
+                    for (java.util.Map.Entry<String, MemoryUsage> e : info.getGcInfo().getMemoryUsageAfterGc().entrySet()) {
+                        String name = e.getKey();
+                        if (name.contains("Metaspace") || name.contains("Code") || name.contains("Compressed") || name.contains("Perm")) {
+                            continue;
+                        }
+                        used += e.getValue().getUsed();
+                    }
+                    double fraction = recordHeap((double) used / HEAP_MAX);
+                    heapAfterGc = fraction;
+                    if (info.getGcAction().contains("major")) {
+                        FULL_GCS.incrementAndGet();
+                    }
+                    HeapWatch.afterGc(fraction);
+                }, null, null);
+            }
+        } catch (Throwable ignored) {
+            // no notifications: only the geometry budget applies
+        }
+    }
+
+    /**
+     * After a young collection the old generation still holds garbage until a marking cycle and the mixed collections
+     * after it, so a single reading overstates live data. The value used is the lowest reading of the last 30 s.
+     */
+    private static final int HEAP_WINDOW = 64;
+    private static final double[] heapReadings = new double[HEAP_WINDOW];
+    private static final long[] heapReadingTimes = new long[HEAP_WINDOW];
+    private static int heapReadingNext;
+
+    private static synchronized double recordHeap(double fraction) {
+        long now = System.nanoTime();
+        heapReadings[heapReadingNext] = fraction;
+        heapReadingTimes[heapReadingNext] = now;
+        heapReadingNext = (heapReadingNext + 1) % HEAP_WINDOW;
+        double min = fraction;
+        for (int i = 0; i < HEAP_WINDOW; i++) {
+            if (heapReadingTimes[i] != 0L && now - heapReadingTimes[i] < 30_000_000_000L && heapReadings[i] < min) {
+                min = heapReadings[i];
+            }
+        }
+        return min;
+    }
+
+    private static boolean heapTight() {
+        return heapAfterGc > HEAP_TIGHT;
     }
 
     /** A link of at least MIN_BYTES was created holding raw bytes of unpacked geometry (any thread); its token. */
@@ -103,11 +188,11 @@ public final class GeometryPacker {
         }
         Tracked t = new Tracked(link, System.nanoTime() + PACK_AFTER);
         setRaw(t, raw);
-        QUEUE.add(t);
+        enqueue(t);
         return t;
     }
 
-    /** The number of unpacked heap bytes a link holds now (0 once packed). */
+    /** The number of unpacked bytes a link holds now (0 once packed). */
     public static void setRaw(Object token, long raw) {
         if (!(token instanceof Tracked)) {
             return;
@@ -119,6 +204,23 @@ public final class GeometryPacker {
         long now = RAW.addAndGet(raw - t.raw.getAndSet(raw));
         long peak;
         while (now > (peak = RAW_PEAK.get()) && !RAW_PEAK.compareAndSet(peak, now)) {
+        }
+    }
+
+    private static void enqueue(Tracked t) {
+        QUEUED.incrementAndGet();
+        QUEUE.add(t);
+    }
+
+    /** A packed link was unpacked again: back into the queue, due in PACK_AFTER. */
+    public static void requeue(Object token) {
+        if (token instanceof Tracked) {
+            Tracked t = (Tracked) token;
+            if (!t.released && !t.queued) {
+                t.queued = true;
+                t.due = System.nanoTime() + PACK_AFTER;
+                enqueue(t);
+            }
         }
     }
 
@@ -162,9 +264,16 @@ public final class GeometryPacker {
         }
     }
 
-    /** Bytes 0..length of a direct buffer as a native-order heap buffer (position 0, limit length); else src itself. */
+    /**
+     * Bytes 0..length of a direct buffer as a native-order heap buffer (position 0, limit length); src itself when src is
+     * not direct, too short, or the heap is tight.
+     */
     public static ByteBuffer heapCopy(ByteBuffer src, int length) {
         if (src == null || !src.isDirect() || length < 0 || src.capacity() < length) {
+            return src;
+        }
+        if (heapTight()) {
+            HEAP_SKIPS.incrementAndGet();
             return src;
         }
         try {
@@ -177,6 +286,7 @@ public final class GeometryPacker {
             HEAP_COPY_BYTES.addAndGet(length);
             return ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
         } catch (OutOfMemoryError e) {
+            HEAP_SKIPS.incrementAndGet();
             return src;
         }
     }
@@ -241,16 +351,18 @@ public final class GeometryPacker {
                     Thread.sleep(250L);
                     continue;
                 }
+                QUEUED.decrementAndGet();
                 PackableLink link = t.link.get();
                 if (link == null || t.released) {
                     // collected, or no longer its tile entity's geometry: whatever it was counted for is gone
                     setRaw(t, 0L);
+                    t.queued = false;
                     continue;
                 }
                 long now = System.nanoTime();
-                boolean pressure = RAW.get() > RAW_BUDGET;
+                boolean pressure = RAW.get() > RAW_BUDGET || heapAfterGc > HEAP_PRESSURE;
                 if (!pressure && t.due > now) {
-                    QUEUE.add(t);
+                    enqueue(t);
                     requestCollectionIfDue();
                     Thread.sleep(Math.min(250L, Math.max(10L, (t.due - now) / 1_000_000L)));
                     continue;
@@ -258,8 +370,8 @@ public final class GeometryPacker {
                 long touched = link.ltfix$touched();
                 if (now - touched < (pressure ? PRESSURE_IDLE : PACK_AFTER)) {
                     t.due = touched + PACK_AFTER;
-                    QUEUE.add(t);
-                    if (pressure && ++requeued > QUEUE.size() + 16) {
+                    enqueue(t);
+                    if (pressure && ++requeued > QUEUED.get() + 16) {
                         // every link left is in use right now
                         requeued = 0;
                         Thread.sleep(20L);
@@ -267,8 +379,16 @@ public final class GeometryPacker {
                     continue;
                 }
                 requeued = 0;
-                if (link.ltfix$pack(deflater, in, out) && pressure) {
-                    PRESSURE_PACKS.incrementAndGet();
+                if (link.ltfix$pack(deflater, in, out)) {
+                    // packed: it comes back through requeue() when a reader unpacks it
+                    t.queued = false;
+                    if (pressure) {
+                        PRESSURE_PACKS.incrementAndGet();
+                    }
+                } else {
+                    // not packable, or touched meanwhile: try again later
+                    t.due = System.nanoTime() + PACK_AFTER;
+                    enqueue(t);
                 }
                 requestCollectionIfDue();
             } catch (InterruptedException e) {
@@ -392,37 +512,56 @@ public final class GeometryPacker {
         DROPPED_SINCE_GC.addAndGet(raw);
     }
 
-    /** Inflates a packed link into a new native-order heap buffer, position 0 and limit length. */
+    /**
+     * Inflates a packed link into a new native-order buffer, position 0 and limit length: a heap buffer, or a direct one
+     * while the heap is tight (or packing is off).
+     */
     public static ByteBuffer inflate(byte[] packed, int length) {
         long t0 = System.nanoTime();
         Inflater inf = INFLATER.get();
         inf.reset();
         inf.setInput(packed);
-        byte[] bytes = new byte[length];
-        int filled = 0;
+        ByteBuffer dst;
         try {
-            while (filled < length) {
-                int n = inf.inflate(bytes, filled, length - filled);
-                if (n == 0 && (inf.finished() || inf.needsInput() || inf.needsDictionary())) {
-                    break;
+            if (ENABLED && !heapTight()) {
+                byte[] bytes = new byte[length];
+                int filled = 0;
+                while (filled < length) {
+                    int n = inf.inflate(bytes, filled, length - filled);
+                    if (n == 0 && (inf.finished() || inf.needsInput() || inf.needsDictionary())) {
+                        break;
+                    }
+                    filled += n;
                 }
-                filled += n;
+                dst = ByteBuffer.wrap(bytes, 0, filled).order(ByteOrder.nativeOrder());
+                dst.position(filled);
+            } else {
+                byte[] scratch = SCRATCH.get();
+                dst = ByteBuffer.allocateDirect(length).order(ByteOrder.nativeOrder());
+                while (dst.hasRemaining()) {
+                    int n = inf.inflate(scratch, 0, Math.min(scratch.length, dst.remaining()));
+                    if (n == 0 && (inf.finished() || inf.needsInput() || inf.needsDictionary())) {
+                        break;
+                    }
+                    dst.put(scratch, 0, n);
+                }
             }
         } catch (DataFormatException e) {
             broken = true;
             FAILURES.incrementAndGet();
             throw new IllegalStateException("ltfix: packed tile geometry is corrupt", e);
         }
-        if (filled < length) {
+        if (dst.position() < length) {
             broken = true;
             FAILURES.incrementAndGet();
-            throw new IllegalStateException("ltfix: packed tile geometry is short: " + filled + " of " + length);
+            throw new IllegalStateException("ltfix: packed tile geometry is short: " + dst.position() + " of " + length);
         }
+        dst.flip();
         UNPACKS.incrementAndGet();
         UNPACK_RAW.addAndGet(length);
         UNPACK_OUT.addAndGet(packed.length);
         UNPACK_NANOS.addAndGet(System.nanoTime() - t0);
-        return ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+        return dst;
     }
 
     public static String stats() {
@@ -432,9 +571,10 @@ public final class GeometryPacker {
         long held = (PACK_RAW.get() - UNPACK_RAW.get()) >> 20;
         long heldPacked = (PACK_OUT.get() - UNPACK_OUT.get()) >> 20;
         return "pack " + PACKS.get() + " " + held + "MB->" + heldPacked + "MB " + (PACK_NANOS.get() / 1_000_000L) + "ms unpack " + UNPACKS.get()
-            + " " + (UNPACK_RAW.get() >> 20) + "MB " + (UNPACK_NANOS.get() / 1_000_000L) + "ms queue " + QUEUE.size() + " gc " + GC_REQUESTS.get()
+            + " " + (UNPACK_RAW.get() >> 20) + "MB " + (UNPACK_NANOS.get() / 1_000_000L) + "ms queue " + QUEUED.get() + " gc " + GC_REQUESTS.get()
             + " raw " + (RAW.get() >> 20) + "/" + (RAW_BUDGET >> 20) + "MB peak " + (RAW_PEAK.get() >> 20) + "MB heapCopies " + HEAP_COPIES.get()
-            + " " + (HEAP_COPY_BYTES.get() >> 20) + "MB pressurePacks " + PRESSURE_PACKS.get() + " stalls " + STALLS.get() + " "
+            + " " + (HEAP_COPY_BYTES.get() >> 20) + "MB heapAfterGc " + Math.round(heapAfterGc * 100) + "% fullGc " + FULL_GCS.get()
+            + " heapSkips " + HEAP_SKIPS.get() + " pressurePacks " + PRESSURE_PACKS.get() + " stalls " + STALLS.get() + " "
             + (STALL_NANOS.get() / 1_000_000L) + "ms directRetries " + DIRECT_RETRIES.get()
             + (FAILURES.get() > 0 ? " FAILURES " + FAILURES.get() : "") + (broken ? " BROKEN" : "");
     }

@@ -1,5 +1,6 @@
 package ru.arthaix.keystone.ltfix.mixin;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import org.spongepowered.asm.mixin.Mixin;
@@ -8,13 +9,23 @@ import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import com.creativemd.creativecore.client.rendering.RenderBox;
+
+import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.vertex.VertexFormat;
+import ru.arthaix.keystone.ltfix.GeometryPacker;
 import ru.arthaix.keystone.ltfix.RenderChunks;
 import ru.arthaix.keystone.ltfix.RenderRetry;
+import ru.arthaix.keystone.ltfix.TileBuilders;
 
 /**
- * RenderingThread.run: the outer "catch (Exception e) { e.printStackTrace(); updateCoords.add(data); }" is what spun on
- * tiles without data. Its printStackTrace (the second Exception.printStackTrace call in run) now marks the job for a
- * delayed retry, and the following queue add schedules it instead of re-adding it at once.
+ * 1. RenderingThread.run: the outer "catch (Exception e) { e.printStackTrace(); updateCoords.add(data); }" is what spun
+ *    on tiles without data. Its printStackTrace (the second Exception.printStackTrace call in run) now marks the job for
+ *    a delayed retry, and the following queue add schedules it instead of re-adding it at once.
+ * 2. Every tile entity build allocated a new direct BufferBuilder per layer (createVertexBuffer). Its bytes are copied
+ *    to the heap as soon as the build is stored (MixinLayeredRenderBufferCache), so each rendering thread now reuses
+ *    one builder, grown to the largest build it has seen.
  */
 @Mixin(targets = "com.creativemd.littletiles.client.render.cache.RenderingThread", remap = false)
 public abstract class MixinRenderingThread {
@@ -27,6 +38,12 @@ public abstract class MixinRenderingThread {
     @SuppressWarnings("rawtypes")
     private boolean ltfix$requeue(ConcurrentLinkedQueue queue, Object data) {
         return RenderRetry.requeue(queue, data);
+    }
+
+    @Redirect(method = "run()V", at = @At(value = "INVOKE",
+              target = "Lcom/creativemd/littletiles/client/render/cache/LayeredRenderBufferCache;createVertexBuffer(Lnet/minecraft/client/renderer/vertex/VertexFormat;Ljava/util/List;)Lnet/minecraft/client/renderer/BufferBuilder;"))
+    private BufferBuilder ltfix$reuseBuilder(VertexFormat format, List<? extends RenderBox> cubes) {
+        return GeometryPacker.active() ? TileBuilders.take(format, cubes) : com.creativemd.littletiles.client.render.cache.LayeredRenderBufferCache.createVertexBuffer(format, cubes);
     }
 
     /** RenderingData is a private class of LittleTiles, hence Object. */

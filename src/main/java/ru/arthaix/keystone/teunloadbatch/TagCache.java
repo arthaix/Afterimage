@@ -22,6 +22,10 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
  * objects to its client without encoding them. The first VERIFY_FIRST reuses and every VERIFY_EVERY-th after that are
  * compared with a freshly written tag; one difference turns the cache off for the rest of the run and is logged.
  * -Dteunloadbatch.tagCache=false turns it off, -Dteunloadbatch.tagCacheMB (768) bounds the bytes held, oldest dropped first.
+ *
+ * The bytes live on the tile entity only; ORDER holds the tile entities weakly, in the order their bytes were made, for
+ * eviction. An entry whose bytes were voided by a change is marked dead and skipped; once a quarter of the budget has
+ * died since the last cleaning, ORDER is cleaned of dead entries so that edits do not grow it without bound.
  */
 public final class TagCache {
     public static final boolean ENABLED = !"false".equals(System.getProperty("teunloadbatch.tagCache")) && dedicatedServer();
@@ -36,25 +40,30 @@ public final class TagCache {
 
     private static final class Stored {
         final WeakReference<TileEntity> te;
-        final byte[] body;
+        final int length;
+        /** the bytes were voided by bump(); their length has been taken off HELD already */
+        volatile boolean dead;
 
-        Stored(TileEntity te, byte[] body) {
+        Stored(TileEntity te, int length) {
             this.te = new WeakReference<TileEntity>(te);
-            this.body = body;
+            this.length = length;
         }
     }
 
     private static final ConcurrentLinkedQueue<Stored> ORDER = new ConcurrentLinkedQueue<Stored>();
     private static final AtomicLong HELD = new AtomicLong();
+    private static final AtomicLong DEAD_SINCE_CLEAN = new AtomicLong();
     private static final AtomicLong HITS = new AtomicLong();
     private static final AtomicLong MISSES = new AtomicLong();
     private static final AtomicLong HIT_BYTES = new AtomicLong();
     private static final AtomicLong EVICTED = new AtomicLong();
+    private static final AtomicLong CLEANED = new AtomicLong();
     private static final AtomicLong VERIFIED = new AtomicLong();
     private static final AtomicLong MISMATCHES = new AtomicLong();
     private static volatile boolean active = ENABLED;
     private static volatile String disabledBy;
     private static volatile Class<?>[] cacheable;
+    private static volatile boolean cleaning;
 
     private TagCache() {
     }
@@ -140,20 +149,37 @@ public final class TagCache {
         byte[] fresh = serialize(tag);
         // the tag getter itself may have changed the tile entity (and bumped its version): keep nothing then
         if (fresh != null && fresh.length <= MAX_BODY && holder.teunloadbatch$tagVersion() == version) {
+            // whatever the holder had is unaccounted here only if it was never bumped (bump takes it off HELD)
             byte[] old = holder.teunloadbatch$tagBody();
+            Object oldOwner = holder.teunloadbatch$tagOwner();
+            if (old != null && oldOwner instanceof Stored && !((Stored) oldOwner).dead) {
+                ((Stored) oldOwner).dead = true;
+                HELD.addAndGet(-old.length);
+                DEAD_SINCE_CLEAN.addAndGet(old.length);
+            }
+            Stored stored = new Stored(te, fresh.length);
             holder.teunloadbatch$setTagBody(fresh, version);
-            HELD.addAndGet(fresh.length - (old == null ? 0 : old.length));
-            ORDER.add(new Stored(te, fresh));
+            holder.teunloadbatch$setTagOwner(stored);
+            HELD.addAndGet(fresh.length);
+            ORDER.add(stored);
             evictOverBudget();
+            cleanIfDue();
         }
         return tag;
     }
 
     /** Any change to a tile entity (server thread or wherever the mod changes it). */
     public static void bump(TileEntity te) {
-        byte[] dropped = ((TagCacheHolder) te).teunloadbatch$bumpTagVersion();
+        TagCacheHolder holder = (TagCacheHolder) te;
+        Object owner = holder.teunloadbatch$tagOwner();
+        byte[] dropped = holder.teunloadbatch$bumpTagVersion();
         if (dropped != null) {
             HELD.addAndGet(-dropped.length);
+            DEAD_SINCE_CLEAN.addAndGet(dropped.length);
+        }
+        if (owner instanceof Stored) {
+            ((Stored) owner).dead = true;
+            holder.teunloadbatch$setTagOwner(null);
         }
     }
 
@@ -164,18 +190,50 @@ public final class TagCache {
         long target = BUDGET - (BUDGET >> 4);
         Stored s;
         while (HELD.get() > target && (s = ORDER.poll()) != null) {
+            if (s.dead) {
+                continue;
+            }
             TileEntity te = s.te.get();
             if (te == null) {
-                // collected with its bytes; the accounting follows the queue
-                HELD.addAndGet(-s.body.length);
+                // collected with its bytes and never bumped (chunk unload does not bump): the accounting follows the queue
+                s.dead = true;
+                HELD.addAndGet(-s.length);
                 continue;
             }
             TagCacheHolder holder = (TagCacheHolder) te;
-            if (holder.teunloadbatch$tagBody() == s.body) {
+            if (holder.teunloadbatch$tagOwner() == s) {
                 holder.teunloadbatch$setTagBody(null, 0);
-                HELD.addAndGet(-s.body.length);
+                holder.teunloadbatch$setTagOwner(null);
+                s.dead = true;
+                HELD.addAndGet(-s.length);
                 EVICTED.incrementAndGet();
             }
+        }
+    }
+
+    /** Drops dead entries from ORDER once a quarter of the budget has died since the last cleaning. */
+    private static void cleanIfDue() {
+        if (DEAD_SINCE_CLEAN.get() < (BUDGET >> 2) || cleaning) {
+            return;
+        }
+        cleaning = true;
+        try {
+            DEAD_SINCE_CLEAN.set(0L);
+            long removed = 0L;
+            for (java.util.Iterator<Stored> it = ORDER.iterator(); it.hasNext();) {
+                Stored s = it.next();
+                if (s.dead || s.te.get() == null) {
+                    if (!s.dead) {
+                        s.dead = true;
+                        HELD.addAndGet(-s.length);
+                    }
+                    it.remove();
+                    removed++;
+                }
+            }
+            CLEANED.addAndGet(removed);
+        } finally {
+            cleaning = false;
         }
     }
 
@@ -184,6 +242,7 @@ public final class TagCache {
             return "tagcache off";
         }
         return "tagcache hits " + HITS.get() + " (" + (HIT_BYTES.get() >> 20) + "MB) misses " + MISSES.get() + " held " + (HELD.get() >> 20)
-            + "MB evicted " + EVICTED.get() + " verified " + VERIFIED.get() + (MISMATCHES.get() > 0 ? " MISMATCH " + MISMATCHES.get() + " (off: " + disabledBy + ")" : "");
+            + "MB evicted " + EVICTED.get() + " cleaned " + CLEANED.get() + " verified " + VERIFIED.get()
+            + (MISMATCHES.get() > 0 ? " MISMATCH " + MISMATCHES.get() + " (off: " + disabledBy + ")" : "");
     }
 }

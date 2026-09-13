@@ -56,7 +56,9 @@ public final class DeferredTiles {
 
     /** Called from the chunk packet handler (client thread). */
     public static void enqueue(WorldClient world, int cx, int cz, List<NBTTagCompound> tags) {
-        if (tags == null || tags.isEmpty()) {
+        // no world: a chunk packet still queued while leaving the server; an entry without one would match
+        // Minecraft.world == null in process() and be applied to nothing (crash)
+        if (world == null || tags == null || tags.isEmpty()) {
             return;
         }
         QUEUE.addLast(new Entry(world, cx, cz, tags));

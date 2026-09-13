@@ -63,10 +63,14 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   buffer, which made tiles disappear or show another chunk's bytes. Geometry not drawn for 30 s is packed until it is
   needed again. Tiles whose data arrives after their chunk was built are rendered again, and the rendering thread no
   longer spins and floods the log on tiles without data.
-- **No "Direct buffer memory" crashes.** The kept geometry lives in the Java heap, not in direct memory, which the game
-  only got back once the collector reached it: rebuilding a big import in view filled it and crashed the game. Unpacked
-  geometry has a budget (an eighth of the heap); above it everything not in use right now is packed at once, and above
-  a fifth chunk workers wait briefly. A chunk buffer allocation that still fails is retried for up to 10 s.
+- **No "Direct buffer memory" crashes.** Every build result of a tile entity is copied into the Java heap the moment
+  it is finished, so nothing of LittleTiles' geometry stays in direct memory, which the game only got back once the
+  collector reached it: rebuilding a big import in view filled it and crashed the game. Each rendering thread reuses one
+  build buffer instead of allocating one per tile and layer. Unpacked geometry has a budget (an eighth of the heap);
+  above it everything not in use right now is packed at once, and above a fifth chunk workers wait briefly. When the
+  heap itself is over three quarters full after collections, new copies stay in direct memory instead. A chunk buffer
+  allocation that still fails is retried for up to 10 s. Render slots that move to sections without tiles forget the
+  previous section's geometry instead of holding it.
 - **Packet budget.** The scheduled-task queue, chunk packets included, runs for at most 10 ms per frame, and the tile
   entity tags of a chunk are applied 4 ms per frame. Nothing is dropped or reordered.
 - **Chisels & Bits baking** filters each voxel blob once per state and layer instead of seven times per block, and its
@@ -89,6 +93,7 @@ In the game or server folder:
 | `ltfix-hitches.log` | stacks and GC time of client frames over 50 ms |
 | `ltfix-ticks.log` | stacks and GC time of server ticks over 150 ms |
 | `ltfix-freeze.log` | the stack of any server tick running for over 5 s, repeated while it stays stuck |
+| `ltfix-heap.log` | the biggest classes on the client heap when it is still 85% full after a collection |
 
 ## Afterimage
 
@@ -185,7 +190,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dltfix.neighborDedup` | true | LittleTiles' neighbour update queue checks duplicates with a hash set |
 | `-Dchunkkeep.radius` | 20 | keep radius in chunks |
 | `-Dchunkkeep.sweepTicks` | 20 | how often kept chunks are checked, in ticks |
-| `-Dchunkkeep.heapGuardPercent` | 85 | above this heap use the farthest half of kept chunks is released |
+| `-Dchunkkeep.heapGuardPercent` | 85 | old generation after its last collection above which the farthest half of kept chunks is released (off again 10 points lower) |
 | `-Dchunkkeep.sendBudgetMs` | 15 | time for chunk packets per tick; 0 sends as vanilla does |
 | `-Dchunkkeep.enterBudgetMs` | 10 | time per tick for chunks that enter view at once; the rest follows nearest first |
 | `-Dchunkkeep.preload` | true | load the pinned chunks at start |
@@ -209,10 +214,15 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dltfix.rawBudgetMB` | heap / 8 | unpacked geometry above which everything idle for `packPressureIdleMs` is packed at once |
 | `-Dltfix.rawHardMB` | heap / 5 | unpacked geometry above which chunk workers wait (up to 2 s) before merging more tiles |
 | `-Dltfix.packPressureIdleMs` | 1000 | idle time that is enough to pack while over the budget |
+| `-Dltfix.heapPressurePercent` | 60 | heap after collections (lowest reading of 30 s) above which the packers work as over budget |
+| `-Dltfix.heapTightPercent` | 75 | heap after collections above which new geometry copies stay in direct memory |
+| `-Dltfix.heapHistogramPercent` | 85 | heap after a collection above which the biggest classes are written to `ltfix-heap.log` |
+| `-Dltfix.heapHistogramMinutes` | 10 | least time between two such histograms |
 | `-Dltfix.packGcMB` | 1024 | freed geometry after which a concurrent GC cycle is requested (only with `-XX:+ExplicitGCInvokesConcurrent` or Shenandoah) |
 | `-Dltfix.directGcMB` | 6144 | direct memory above which such a cycle is requested |
 | `-Dltfix.renderOnRead` | true | render tiles again whose data arrives after their chunk was built |
-| `-Dltfix.retryMs` | 200 | delay before a tile without data is tried again |
+| `-Dltfix.retryMs` | 200 | delay before a tile without data is tried again; doubles per retry |
+| `-Dltfix.retryMaxMs` | 5000 | longest such delay |
 | `-Dltfix.jmPrewarm` | true | decode JourneyMap region images around the player ahead |
 | `-Dltfix.viewChunks` | 6 | server view distance, for the missing-chunks counter in the metrics |
 | `-Dpacketbudget.ms` | 10 | scheduled-task time per frame |
@@ -228,6 +238,8 @@ Everything works with the defaults; these are for tuning and for turning a part 
 |---|---|---|
 | `-Dafterimage.far` | true | far zone on or off |
 | `-Dafterimage.farBudgetMB` | 8192 | VRAM for far-zone copies, farthest evicted first |
+| `-Dafterimage.lowFreeMB` | 4096 | available RAM below which the budget shrinks by the shortfall (never below `farMinBudgetMB`, 1024) |
+| `-Dafterimage.highFreeMB` | 6144 | available RAM above which it grows back, 256 MB per check |
 | `-Dafterimage.farPlane` | 8192 | far clipping plane used for the far zone, in blocks |
 | `-Dafterimage.farNear` | 6 | near clipping plane of the far pass, in blocks (depth precision far away) |
 | `-Dafterimage.fogEnd` | 2048 | fog end while the far zone has content, in blocks; 0 keeps vanilla fog |

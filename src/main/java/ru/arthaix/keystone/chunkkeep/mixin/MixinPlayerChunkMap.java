@@ -23,6 +23,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import ru.arthaix.keystone.chunkkeep.Config;
+import ru.arthaix.keystone.chunkkeep.HeapGuard;
 
 /**
  * 1. Keeps a player registered on chunk entries that left view-distance but are still within Config.KEEP_RADIUS.
@@ -229,8 +230,7 @@ public abstract class MixinPlayerChunkMap {
             return;
         }
         this.chunkkeep$ticks = 0;
-        Runtime rt = Runtime.getRuntime();
-        boolean heapPressure = (rt.totalMemory() - rt.freeMemory()) > rt.maxMemory() * Config.HEAP_GUARD;
+        boolean heapPressure = HeapGuard.pressure();
         for (Map.Entry<EntityPlayerMP, Set<PlayerChunkMapEntry>> e : kept.entrySet()) {
             EntityPlayerMP player = e.getKey();
             Set<PlayerChunkMapEntry> set = e.getValue();

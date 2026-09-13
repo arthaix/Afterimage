@@ -74,7 +74,7 @@ public final class Far {
     private static final long MIN_BUDGET = Long.getLong("afterimage.farMinBudgetMB", 1024L) << 20;
     /** Below this much available RAM the far zone gives copies back; above HIGH_FREE it grows back toward BUDGET. */
     private static final long LOW_FREE = Long.getLong("afterimage.lowFreeMB", 4096L) << 20;
-    private static final long HIGH_FREE = Long.getLong("afterimage.highFreeMB", 10240L) << 20;
+    private static final long HIGH_FREE = Long.getLong("afterimage.highFreeMB", 6144L) << 20;
     private static long budgetNow = BUDGET;
     private static long lastMemoryCheck;
     private static long budgetLowered;
@@ -108,7 +108,14 @@ public final class Far {
             return;
         }
         if (free < LOW_FREE) {
-            long target = Math.max(MIN_BUDGET, Math.min(budgetNow, bytes) - (LOW_FREE - free));
+            // shrink by the shortfall only, and only by a noticeable one: a base of min(budgetNow, bytes) dropped the
+            // budget to the floor in one step whenever RAM dipped, and it then took more RAM than this machine ever has
+            // free to climb back, so the far zone spent half its time at 1 GB
+            long shortfall = LOW_FREE - free;
+            if (shortfall < (256L << 20)) {
+                return;
+            }
+            long target = Math.max(MIN_BUDGET, budgetNow - shortfall);
             if (target < budgetNow) {
                 budgetNow = target;
                 budgetLowered++;

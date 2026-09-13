@@ -22,6 +22,19 @@ public abstract class MixinTileEntityTags implements TagCacheHolder {
     @Unique
     private int teunloadbatch$tagBodyVersion;
 
+    @Unique
+    private Object teunloadbatch$tagOwner;
+
+    @Override
+    public Object teunloadbatch$tagOwner() {
+        return this.teunloadbatch$tagOwner;
+    }
+
+    @Override
+    public void teunloadbatch$setTagOwner(Object owner) {
+        this.teunloadbatch$tagOwner = owner;
+    }
+
     @Override
     public int teunloadbatch$tagVersion() {
         return this.teunloadbatch$tagVersion;

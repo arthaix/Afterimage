@@ -30,7 +30,10 @@
     "MixinJmRegionImageHandler",
     "MixinLittleNBTCompressionTools",
     "MixinLayeredRenderBufferCache",
-    "MixinLittleChunkDispatcher"
+    "MixinLittleChunkDispatcher",
+    "MixinLittleRenderChunk",
+    "ChunkBlockLayerManagerAccessor",
+    "MixinRenderChunkLtCache"
   ],
   "server": []
 }

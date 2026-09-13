@@ -12,4 +12,9 @@ public interface TagCacheHolder {
 
     /** Any change to the tile entity: the cached bytes are void. Returns the bytes that were held, or null. */
     byte[] teunloadbatch$bumpTagVersion();
+
+    /** TagCache's bookkeeping entry for the held bytes (opaque), null when nothing is held. */
+    Object teunloadbatch$tagOwner();
+
+    void teunloadbatch$setTagOwner(Object owner);
 }
