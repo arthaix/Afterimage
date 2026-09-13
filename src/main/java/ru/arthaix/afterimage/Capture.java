@@ -245,6 +245,14 @@ public final class Capture {
         v.afterimage$setLastSize(0);
     }
 
+    public static long liveMb() {
+        long t = 0L;
+        for (long l : LIVE) {
+            t += l;
+        }
+        return t >> 20;
+    }
+
     public static void onUpload(VertexBuffer vb, ByteBuffer buf) {
         if (!ENABLED || buf == null) {
             return;
@@ -258,6 +266,7 @@ public final class Capture {
             int size = buf.remaining();
             uploads++;
             uploadBytes += size;
+            ru.arthaix.keystone.ltfix.GpuTrace.upload(size);
             int prev = v.afterimage$lastSize();
             v.afterimage$setLastSize(size);
             RenderChunk rc = v.afterimage$owner();

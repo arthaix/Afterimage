@@ -180,6 +180,13 @@ public final class FrameWatch implements Runnable {
         StringBuilder out = new StringBuilder();
         out.append(this.stamp.format(new Date())).append(' ').append(this.kind).append(' ').append(durationMs).append(" ms, gc ")
             .append(gcMs).append(" ms, ").append(this.samples).append(" samples after the first ").append(START_MS).append(" ms\n");
+        if ("hitch".equals(this.kind) && durationMs >= 1000L) {
+            // a stall inside the driver says only that the GPU was busy: what was uploaded, and how full VRAM is
+            try {
+                out.append("   ").append(GpuTrace.describe()).append('\n');
+            } catch (Throwable ignored) {
+            }
+        }
         for (int i = 0; i < list.size() && i < 3; i++) {
             out.append("   ").append(list.get(i).getValue()).append(" samples:\n").append(list.get(i).getKey());
         }

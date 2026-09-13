@@ -97,8 +97,8 @@ public final class Far {
      * used for both before, and it is near zero whenever the file cache is full, so the far zone was emptied on every
      * flight for no reason.
      */
-    private static final long LOW_VRAM = Long.getLong("afterimage.lowVramMB", 1536L) << 20;
-    private static final long HIGH_VRAM = Long.getLong("afterimage.highVramMB", 2560L) << 20;
+    private static final long LOW_VRAM = Long.getLong("afterimage.lowVramMB", 2560L) << 20;
+    private static final long HIGH_VRAM = Long.getLong("afterimage.highVramMB", 3584L) << 20;
     private static final int GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX = 0x9049;
     private static Boolean vramInfo;
 
@@ -1007,6 +1007,11 @@ public final class Far {
         bytes = 0;
         GEOM.clear();
         CHANGES.clear();
+    }
+
+    /** For hitch reports: far copies in VRAM, tracked vanilla section geometry, free VRAM. */
+    public static String gpuState() {
+        return "far " + (bytes >> 20) + "/" + (budgetNow >> 20) + " MB, sections live " + Capture.liveMb() + " MB, vram free " + (availableVram() >> 20) + " MB";
     }
 
     public static String summary() {

@@ -94,7 +94,7 @@ In the game or server folder:
 | File | Content |
 |---|---|
 | `ltfix-metrics.log` | a line every 10 s: frame or tick spikes, queues, memory, cache and edit counters |
-| `ltfix-hitches.log` | stacks and GC time of client frames over 50 ms |
+| `ltfix-hitches.log` | stacks and GC time of client frames over 50 ms; frames over 1 s also list the chunk uploads of the last 3 s and the VRAM state |
 | `ltfix-ticks.log` | stacks and GC time of server ticks over 150 ms |
 | `ltfix-freeze.log` | the stack of any server tick running for over 5 s, repeated while it stays stuck |
 | `ltfix-heap.log` | the biggest classes on the client heap when it is still 85% full after a collection |
@@ -245,8 +245,8 @@ Everything works with the defaults; these are for tuning and for turning a part 
 |---|---|---|
 | `-Dafterimage.far` | true | far zone on or off |
 | `-Dafterimage.farBudgetMB` | 8192 | VRAM for far-zone copies, farthest evicted first |
-| `-Dafterimage.lowVramMB` | 1536 | free VRAM (NVIDIA cards report it) below which the budget shrinks by the shortfall, never below `farMinBudgetMB` (1024) |
-| `-Dafterimage.highVramMB` | 2560 | free VRAM above which it grows back, 256 MB per check |
+| `-Dafterimage.lowVramMB` | 2560 | free VRAM (NVIDIA cards report it) below which the budget shrinks by the shortfall, never below `farMinBudgetMB` (1024) |
+| `-Dafterimage.highVramMB` | 3584 | free VRAM above which it grows back, 256 MB per check |
 | `-Dafterimage.diskCapMB` | 8192 | disk cache size above which the files least recently written are removed at join |
 | `-Dafterimage.lowFreeMB` | 4096 | same, on available RAM, only where copies are not immutable (no ARB_buffer_storage) |
 | `-Dafterimage.highFreeMB` | 6144 | |
