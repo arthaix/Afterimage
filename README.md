@@ -46,6 +46,10 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   enter view all at once (login, teleport) are sent nearest first over the following ticks.
 - **City preload.** Chunks listed in `config/chunkkeep-pins.txt` (one `chunkX chunkZ` pair per line, `#` starts a
   comment) are loaded at start through Forge's async chunk IO, paced by tick time, and stay loaded.
+- **Large edits no longer flood the connection.** A chunk with over 64 changed blocks in a tick is re-sent whole, tile
+  entities included; an import or undo of tens of thousands of blocks did that for the same chunks every tick, for half
+  a minute, and the player timed out behind gigabytes of chunk packets. A chunk is now re-sent whole at most every
+  1.5 s, chunk sending waits while more than 12 MB is queued to the player, and big packets are compressed at level 1.
 - **Huge chunks reach the player.** A chunk packet over 2 MB (a model imported at hundreds of LittleTiles tiles per
   block) disconnected the player with "unable to fit ... into 3" every time they came near. It is now sent as the
   chunk followed by packets with the rest of its tile entities, written together so nothing gets between them.
@@ -203,6 +207,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dchunkkeep.packetBytes` | 1900000 | uncompressed size above which a chunk packet is split |
 | `-Dchunkkeep.backlogMB` | 12 | chunk packet bytes queued to a player's connection above which chunk sending waits (a keep-alive stuck behind them timed players out) |
 | `-Dchunkkeep.fastDeflateKB` | 256 | packets at least this big are compressed at zlib level 1 instead of 6 |
+| `-Dchunkkeep.fullResendMs` | 1500 | least time between two whole-chunk re-sends of a chunk with many changed blocks (large edits changed the same chunks every tick) |
 
 ### Client
 

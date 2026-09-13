@@ -95,7 +95,24 @@ public final class SendBacklog {
         return false;
     }
 
+    /** Dirty entries whose whole-chunk re-send was postponed this tick (server thread only). */
+    private static final java.util.ArrayList<net.minecraft.server.management.PlayerChunkMapEntry> DEFERRED = new java.util.ArrayList<net.minecraft.server.management.PlayerChunkMapEntry>();
+    private static final AtomicLong DEFERRED_RESENDS = new AtomicLong();
+
+    public static void deferDirty(net.minecraft.server.management.PlayerChunkMapEntry entry) {
+        DEFERRED.add(entry);
+        DEFERRED_RESENDS.incrementAndGet();
+    }
+
+    /** End of PlayerChunkMap.tick(), after it cleared its dirty set: the postponed entries go back on it. */
+    public static void readdDeferred(java.util.Set<net.minecraft.server.management.PlayerChunkMapEntry> dirty) {
+        if (!DEFERRED.isEmpty()) {
+            dirty.addAll(DEFERRED);
+            DEFERRED.clear();
+        }
+    }
+
     public static String stats() {
-        return "sendBacklog waits " + WAITS.get() + " avgTag " + averageTag;
+        return "sendBacklog waits " + WAITS.get() + " deferredResends " + DEFERRED_RESENDS.get() + " avgTag " + averageTag;
     }
 }

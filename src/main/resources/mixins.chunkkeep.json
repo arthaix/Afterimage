@@ -18,6 +18,8 @@
     "MixinNetworkManagerSend",
     "MixinNettyCompressionEncoder",
     "MixinNetHandlerPlayServerKeepAlive",
-    "PlayerChunkMapEntryAccessor"
+    "PlayerChunkMapEntryAccessor",
+    "PlayerChunkMapAccessor",
+    "MixinPlayerChunkMapEntryUpdate"
   ]
 }

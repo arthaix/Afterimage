@@ -31,6 +31,12 @@ public abstract class MixinPlayerChunkMapSend {
         this.chunkkeep$sentOne = false;
     }
 
+    /** tick() cleared its dirty set: entries whose whole-chunk re-send was postponed go back on it. */
+    @Inject(method = "func_72693_b()V", at = @At("RETURN"))
+    private void chunkkeep$readdDeferred(CallbackInfo ci) {
+        SendBacklog.readdDeferred(((PlayerChunkMapAccessor) this).chunkkeep$dirtyEntries());
+    }
+
     /** Both sendToPlayers() calls in tick(): after chunk load and in the pending-send loop. */
     @Redirect(method = "func_72693_b()V",
               at = @At(value = "INVOKE",
