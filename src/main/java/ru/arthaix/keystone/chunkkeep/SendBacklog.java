@@ -7,7 +7,6 @@ import io.netty.channel.Channel;
 import io.netty.util.AttributeKey;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.network.play.server.SPacketChunkData;
-import ru.arthaix.keystone.chunkkeep.mixin.ChunkPacketEstimate;
 import ru.arthaix.keystone.chunkkeep.mixin.NetworkManagerAccessor;
 import ru.arthaix.keystone.chunkkeep.mixin.SPacketChunkDataAccessor;
 
@@ -23,6 +22,8 @@ public final class SendBacklog {
     private static final long LIMIT = Long.getLong("chunkkeep.backlogMB", 12L) << 20;
     private static final AttributeKey<AtomicLong> PENDING = AttributeKey.valueOf("keystone:chunk_backlog");
     private static volatile long averageTag = 1024L;
+    /** the bytes each queued packet was counted for, until the netty thread encodes it */
+    private static final java.util.Map<SPacketChunkData, Long> ESTIMATES = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<SPacketChunkData, Long>());
     private static final AtomicLong WAITS = new AtomicLong();
 
     private SendBacklog() {
@@ -57,15 +58,14 @@ public final class SendBacklog {
         byte[] data = a.chunkkeep$getData();
         List<?> tags = a.chunkkeep$getTags();
         long estimate = 64L + (data == null ? 0 : data.length) + (tags == null ? 0 : tags.size() * averageTag);
-        ((ChunkPacketEstimate) packet).chunkkeep$setEstimate(estimate);
+        ESTIMATES.put(packet, estimate);
         counter(channel).addAndGet(estimate);
     }
 
     /** ChunkPacketSplitter.write (netty thread): the packet is being encoded now. */
     public static void encoding(Channel channel, SPacketChunkData packet) {
-        long estimate = ((ChunkPacketEstimate) packet).chunkkeep$estimate();
-        if (estimate > 0 && channel != null) {
-            ((ChunkPacketEstimate) packet).chunkkeep$setEstimate(0L);
+        Long estimate = ESTIMATES.remove(packet);
+        if (estimate != null && channel != null) {
             AtomicLong c = channel.attr(PENDING).get();
             if (c != null) {
                 c.addAndGet(-estimate);
