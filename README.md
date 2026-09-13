@@ -201,6 +201,8 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dchunkkeep.preloadIoThreads` | cores / 3, 2 to 8 | chunk IO threads during preload |
 | `-Dchunkkeep.skipSpeedCheckForBuilders` | true | creative and spectator players skip "moved too quickly" |
 | `-Dchunkkeep.packetBytes` | 1900000 | uncompressed size above which a chunk packet is split |
+| `-Dchunkkeep.backlogMB` | 12 | chunk packet bytes queued to a player's connection above which chunk sending waits (a keep-alive stuck behind them timed players out) |
+| `-Dchunkkeep.fastDeflateKB` | 256 | packets at least this big are compressed at zlib level 1 instead of 6 |
 
 ### Client
 

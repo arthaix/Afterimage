@@ -13,6 +13,12 @@
     "MixinPlayerChunkMapSend",
     "MixinMovementCheck",
     "MixinNetworkManagerSplit",
-    "SPacketChunkDataAccessor"
+    "SPacketChunkDataAccessor",
+    "MixinSPacketChunkDataEstimate",
+    "NetworkManagerAccessor",
+    "MixinNetworkManagerSend",
+    "MixinNettyCompressionEncoder",
+    "MixinNetHandlerPlayServerKeepAlive",
+    "PlayerChunkMapEntryAccessor"
   ]
 }

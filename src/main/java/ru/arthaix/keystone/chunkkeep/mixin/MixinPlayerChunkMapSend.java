@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import ru.arthaix.keystone.chunkkeep.Config;
+import ru.arthaix.keystone.chunkkeep.SendBacklog;
 
 /**
  * Time budget for chunk sending in PlayerChunkMap.tick().
@@ -36,6 +37,10 @@ public abstract class MixinPlayerChunkMapSend {
                        target = "Lnet/minecraft/server/management/PlayerChunkMapEntry;func_187272_b()Z"))
     private boolean chunkkeep$sendBudgeted(PlayerChunkMapEntry entry) {
         if (this.chunkkeep$sentOne && Config.SEND_BUDGET_NANOS > 0 && System.nanoTime() > this.chunkkeep$sendDeadline) {
+            return false;
+        }
+        if (SendBacklog.full(((PlayerChunkMapEntryAccessor) entry).chunkkeep$players())) {
+            // the player's connection still has more than the backlog limit waiting to be encoded
             return false;
         }
         boolean sent = entry.func_187272_b();

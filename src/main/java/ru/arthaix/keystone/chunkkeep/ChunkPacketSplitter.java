@@ -58,6 +58,7 @@ public final class ChunkPacketSplitter extends ChannelOutboundHandlerAdapter {
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         List<SPacketChunkData> parts = null;
         if (msg instanceof SPacketChunkData) {
+            SendBacklog.encoding(ctx.channel(), (SPacketChunkData) msg);
             try {
                 parts = split((SPacketChunkData) msg);
             } catch (Throwable t) {
@@ -95,6 +96,7 @@ public final class ChunkPacketSplitter extends ChannelOutboundHandlerAdapter {
             sizes[i] = NbtSize.root(tags.get(i));
             total += sizes[i];
         }
+        SendBacklog.learn(total - head, n);
         if (total <= BUDGET) {
             return null;
         }
@@ -159,6 +161,6 @@ public final class ChunkPacketSplitter extends ChannelOutboundHandlerAdapter {
     }
 
     public static String stats() {
-        return "split chunk packets " + SPLIT.get() + " extra " + EXTRA.get() + " tags left out " + DROPPED.get();
+        return "split chunk packets " + SPLIT.get() + " extra " + EXTRA.get() + " tags left out " + DROPPED.get() + " " + SendBacklog.stats();
     }
 }
