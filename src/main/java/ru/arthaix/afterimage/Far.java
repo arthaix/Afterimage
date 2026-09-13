@@ -89,30 +89,68 @@ public final class Far {
     }
 
     /**
-     * Client tick. Each GB of far copies also holds RAM in the graphics driver, and a machine short of RAM stalls in the
-     * page file (client and server alike), so when available RAM drops below LOW_FREE the budget shrinks by the shortfall
-     * (never below MIN_BUDGET) and the farthest copies go; with more than HIGH_FREE available it grows back 256 MB per check.
+     * Client tick, every 2 s. Immutable copies (glBufferStorage) live in VRAM only, so the budget follows the card's
+     * free VRAM where the driver reports it (GL_NVX_gpu_memory_info): below LOW_VRAM the budget shrinks by the shortfall
+     * (never below MIN_BUDGET) and the farthest copies go, above HIGH_VRAM it grows back 256 MB per check. Without that
+     * report the budget stays as configured. Only where copies are mutable (no ARB_buffer_storage) the driver keeps a
+     * shadow of each in RAM; then the same rule runs on available RAM (LOW_FREE / HIGH_FREE). Windows' "free" RAM was
+     * used for both before, and it is near zero whenever the file cache is full, so the far zone was emptied on every
+     * flight for no reason.
      */
+    private static final long LOW_VRAM = Long.getLong("afterimage.lowVramMB", 1536L) << 20;
+    private static final long HIGH_VRAM = Long.getLong("afterimage.highVramMB", 2560L) << 20;
+    private static final int GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX = 0x9049;
+    private static Boolean vramInfo;
+
+    private static long availableVram() {
+        if (vramInfo == null) {
+            try {
+                vramInfo = GLContext.getCapabilities().GL_NVX_gpu_memory_info;
+            } catch (Throwable t) {
+                vramInfo = false;
+            }
+        }
+        if (!vramInfo) {
+            return -1L;
+        }
+        try {
+            return (long) GL11.glGetInteger(GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX) << 10;
+        } catch (Throwable t) {
+            vramInfo = false;
+            return -1L;
+        }
+    }
+
     public static void checkMemory(long now) {
         if (now - lastMemoryCheck < 2_000_000_000L) {
             return;
         }
         lastMemoryCheck = now;
-        long free;
-        try {
-            if (os == null) {
-                os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        long available;
+        long low;
+        long high;
+        if (storage()) {
+            available = availableVram();
+            if (available < 0L) {
+                return;
             }
-            free = ((com.sun.management.OperatingSystemMXBean) os).getFreePhysicalMemorySize();
-        } catch (Throwable t) {
-            return;
+            low = LOW_VRAM;
+            high = HIGH_VRAM;
+        } else {
+            try {
+                if (os == null) {
+                    os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+                }
+                available = ((com.sun.management.OperatingSystemMXBean) os).getFreePhysicalMemorySize();
+            } catch (Throwable t) {
+                return;
+            }
+            low = LOW_FREE;
+            high = HIGH_FREE;
         }
-        if (free < LOW_FREE) {
-            // shrink by the shortfall only, and only by a noticeable one: a base of min(budgetNow, bytes) dropped the
-            // budget to the floor in one step whenever RAM dipped, and it then took more RAM than this machine ever has
-            // free to climb back, so the far zone spent half its time at 1 GB
-            long shortfall = LOW_FREE - free;
-            if (shortfall < (256L << 20)) {
+        if (available < low) {
+            long shortfall = low - available;
+            if (shortfall < (128L << 20)) {
                 return;
             }
             long target = Math.max(MIN_BUDGET, budgetNow - shortfall);
@@ -123,7 +161,7 @@ public final class Far {
                     evict();
                 }
             }
-        } else if (free > HIGH_FREE && budgetNow < BUDGET) {
+        } else if (available > high && budgetNow < BUDGET) {
             budgetNow = Math.min(BUDGET, budgetNow + (256L << 20));
         }
     }
@@ -964,7 +1002,7 @@ public final class Far {
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (budgetNow >> 20) + "/" + (BUDGET >> 20) + " MB (lowered " + budgetLowered + "x, immutable " + storage + "), captures " + captures + " (buffers taken " + stolen + ", stale refreshed " + refreshed + "), reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (budgetNow >> 20) + "/" + (BUDGET >> 20) + " MB (lowered " + budgetLowered + "x, immutable " + storage + ", vram free " + (availableVram() >> 20) + " MB), captures " + captures + " (buffers taken " + stolen + ", stale refreshed " + refreshed + "), reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }
