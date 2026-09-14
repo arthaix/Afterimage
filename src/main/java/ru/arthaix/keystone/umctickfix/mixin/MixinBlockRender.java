@@ -26,8 +26,7 @@ import net.minecraft.tileentity.TileEntity;
  * 1.1.1 keeps the UMC tile entities in an indexed list and does bounded work per tick: the next -Dumctickfix.slice
  * (20,000) entries of the world's tile entity list are checked for new ones, and a rotating share of the tracked ones
  * (at least 1,000, all of them within about a second) is re-checked for leaving the world or changing whether they
- * render. RenderGlobal only receives what changed, removals as a set. That needs an O(1) contains on the world list
- * (teunloadbatch's indexed list); on a plain list the 1.0.0 throttle applies.
+ * render. RenderGlobal only receives what changed, removals as a set.
  */
 @Mixin(targets = "cam72cam.mod.render.BlockRender", remap = false)
 public class MixinBlockRender {
@@ -58,16 +57,9 @@ public class MixinBlockRender {
             return;
         }
         List<TileEntity> all = w.field_147482_g;
-        if (!all.getClass().getName().endsWith(".IndexedTileEntityList")) {
-            // plain list: contains() is a linear scan, so keep UMC's own pass, at most once a second
-            long now = System.nanoTime();
-            if (now - umctickfix$lastScanNanos < umctickfix$INTERVAL_NANOS) {
-                ci.cancel();
-            } else {
-                umctickfix$lastScanNanos = now;
-            }
-            return;
-        }
+        // 1.2.11: no longer conditional on the list class (a client whose list was not the indexed one fell back to
+        // UMC's own full pass every second: with 350k tile entities that was a third of the slow frames); "gone from
+        // the world" is a chunk lookup now, never a list scan
         ci.cancel();
         if (w != umctickfix$world) {
             umctickfix$tracked.clear();
@@ -108,7 +100,7 @@ public class MixinBlockRender {
             }
             int i = umctickfix$trackedCursor;
             TileEntity te = umctickfix$tracked.get(i);
-            boolean gone = te.func_145837_r() || te.func_145831_w() != w || !all.contains(te);
+            boolean gone = te.func_145837_r() || te.func_145831_w() != w || w.func_175625_s(te.func_174877_v()) != te;
             boolean renders = !gone && umctickfix$renders(te);
             boolean shown = umctickfix$shown.contains(te);
             if (shown && !renders) {
