@@ -102,7 +102,19 @@ public final class Far {
     private static final int GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX = 0x9049;
     private static Boolean vramInfo;
 
+    /** last reading, for callers off the client thread (hitch reports); -1 until the first one */
+    private static volatile long lastVramFree = -1L;
+
     private static long availableVram() {
+        // GL only on the client thread: a query from the stall sampler's thread threw, and the caught error switched
+        // the VRAM budget off for the rest of the session
+        try {
+            if (!Minecraft.func_71410_x().func_152345_ab()) {
+                return lastVramFree;
+            }
+        } catch (Throwable t) {
+            return lastVramFree;
+        }
         if (vramInfo == null) {
             try {
                 vramInfo = GLContext.getCapabilities().GL_NVX_gpu_memory_info;
@@ -114,7 +126,9 @@ public final class Far {
             return -1L;
         }
         try {
-            return (long) GL11.glGetInteger(GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX) << 10;
+            long free = (long) GL11.glGetInteger(GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX) << 10;
+            lastVramFree = free;
+            return free;
         } catch (Throwable t) {
             vramInfo = false;
             return -1L;
