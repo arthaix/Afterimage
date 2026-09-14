@@ -37,6 +37,7 @@ public final class Pins {
 
     public static int load(File file) throws IOException {
         Set<Long> set = new HashSet<Long>(32768);
+        int bad = 0;
         java.util.List<int[]> list = new java.util.ArrayList<int[]>(32768);
         if (file.isFile()) {
             BufferedReader r = new BufferedReader(new FileReader(file));
@@ -55,8 +56,16 @@ public final class Pins {
                     if (p.length < 2) {
                         continue;
                     }
-                    int x = Integer.parseInt(p[0]);
-                    int z = Integer.parseInt(p[1]);
+                    int x;
+                    int z;
+                    try {
+                        x = Integer.parseInt(p[0]);
+                        z = Integer.parseInt(p[1]);
+                    } catch (NumberFormatException e) {
+                        // one bad line used to abort the whole file and leave every pinned chunk unprotected
+                        bad++;
+                        continue;
+                    }
                     if (set.add(key(x, z))) {
                         list.add(new int[] {x, z});
                     }
@@ -67,6 +76,9 @@ public final class Pins {
         }
         PINNED = set;
         LIST = list.toArray(new int[0][]);
+        if (bad > 0) {
+            System.out.println("[chunkkeep] " + bad + " unreadable line(s) in " + file.getName() + " skipped");
+        }
         return LIST.length;
     }
 }

@@ -44,7 +44,9 @@ public abstract class MixinLittleChunkDispatcher {
                 if (attempt >= 40 || e.getMessage() == null || !e.getMessage().contains("Direct buffer memory")) {
                     throw e;
                 }
-                GeometryPacker.onDirectShortage();
+                if (!GeometryPacker.onDirectShortage()) {
+                    throw e;
+                }
             }
         }
     }

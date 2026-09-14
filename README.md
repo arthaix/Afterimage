@@ -272,6 +272,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `-Dltfix.logRotateMB` | 8 | a diagnostic log bigger than this at start-up is moved aside as `.prev` |
 | `-Dltfix.tickMs` | 150 | server ticks longer than this are sampled |
 | `-Dltfix.sampleMs` | 10 | sampling interval |
+| `-Dltfix.sampleFromMs` | 50 | a frame or tick is sampled only once it is this old (every sample is a safepoint for all threads) |
 | `-Dltfix.freezeMs` | 5000 | a server tick running longer than this is written to `ltfix-freeze.log` |
 
 ## Source layout

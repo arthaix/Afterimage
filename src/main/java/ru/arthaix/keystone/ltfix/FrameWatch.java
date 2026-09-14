@@ -20,8 +20,9 @@ import java.util.Map;
  */
 public final class FrameWatch implements Runnable {
     private static final long MS = 1_000_000L;
-    private static final long START_MS = 25L;
-    /** Every sample is a thread-dump safepoint that stops all threads (3 ms gave ~55 per second in long server ticks). */
+    /** Sampling starts at the threshold: below it nothing is reported anyway, and every sample is a safepoint for all
+     * threads (at 25 ms a loading client at 30 fps was dumped 100 times a second, stalling its workers and packers). */
+    private static final long START_MS = Long.getLong("ltfix.sampleFromMs", 50L);
     private static final long SAMPLE_MS = Long.getLong("ltfix.sampleMs", 10L);
     private static final int DEPTH = 28;
     private static final int MAX_REPORTS_PER_MINUTE = 40;

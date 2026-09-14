@@ -310,7 +310,7 @@ public final class GeometryPacker {
     }
 
     /** A direct allocation for a chunk failed: ask for a concurrent collection (at most every 5 s) and wait a moment. */
-    public static void onDirectShortage() {
+    public static boolean onDirectShortage() {
         DIRECT_RETRIES.incrementAndGet();
         long now = System.nanoTime();
         if (now - lastShortageGc > 5_000_000_000L && concurrentExplicitGc()) {
@@ -319,10 +319,18 @@ public final class GeometryPacker {
             System.gc();
         }
         try {
+            if (net.minecraft.client.Minecraft.func_71410_x().func_152345_ab()) {
+                // never stall the client thread for it
+                return false;
+            }
             Thread.sleep(250L);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return false;
+        } catch (Throwable t) {
+            return false;
         }
+        return true;
     }
 
     private static synchronized void start() {
