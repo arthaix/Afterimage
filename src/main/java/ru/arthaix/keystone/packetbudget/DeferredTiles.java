@@ -4,7 +4,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayDeque;
-import java.util.Iterator;
 import java.util.List;
 
 import net.minecraft.client.Minecraft;
@@ -29,6 +28,8 @@ public final class DeferredTiles {
         final int cx, cz;
         final List<NBTTagCompound> tags;
         int index;
+        /** applied or discarded through flushChunk/dropChunk; skipped when the FIFO reaches it */
+        boolean dropped;
 
         Entry(WorldClient world, int cx, int cz, List<NBTTagCompound> tags) {
             this.world = world;
@@ -39,6 +40,12 @@ public final class DeferredTiles {
     }
 
     private static final ArrayDeque<Entry> QUEUE = new ArrayDeque<Entry>();
+    /** the queued entries of each chunk, so a block change packet finds them without walking the whole queue */
+    private static final java.util.HashMap<Long, java.util.ArrayList<Entry>> BY_CHUNK = new java.util.HashMap<Long, java.util.ArrayList<Entry>>();
+
+    private static long chunkKey(int cx, int cz) {
+        return ((long) cx << 32) ^ (cz & 0xFFFFFFFFL);
+    }
     /** TileEntity.handleUpdateTag(NBTTagCompound) is a Forge-added method with a plain name at runtime. */
     private static final MethodHandle HANDLE_UPDATE_TAG;
     static {
@@ -61,32 +68,48 @@ public final class DeferredTiles {
         if (world == null || tags == null || tags.isEmpty()) {
             return;
         }
-        QUEUE.addLast(new Entry(world, cx, cz, tags));
+        Entry e = new Entry(world, cx, cz, tags);
+        QUEUE.addLast(e);
+        java.util.ArrayList<Entry> list = BY_CHUNK.get(chunkKey(cx, cz));
+        if (list == null) {
+            list = new java.util.ArrayList<Entry>(2);
+            BY_CHUNK.put(chunkKey(cx, cz), list);
+        }
+        list.add(e);
+    }
+
+    private static void unlink(Entry e) {
+        long k = chunkKey(e.cx, e.cz);
+        java.util.ArrayList<Entry> list = BY_CHUNK.get(k);
+        if (list != null) {
+            list.remove(e);
+            if (list.isEmpty()) {
+                BY_CHUNK.remove(k);
+            }
+        }
     }
 
     /** Apply everything still pending for one chunk (client thread). */
     public static void flushChunk(int cx, int cz) {
-        if (QUEUE.isEmpty()) {
+        java.util.ArrayList<Entry> list = BY_CHUNK.remove(chunkKey(cx, cz));
+        if (list == null) {
             return;
         }
         WorldClient current = Minecraft.func_71410_x().field_71441_e;
-        for (Iterator<Entry> it = QUEUE.iterator(); it.hasNext();) {
-            Entry e = it.next();
-            if (e.cx == cx && e.cz == cz) {
-                it.remove();
-                if (e.world == current) {
-                    applyAll(e);
-                }
+        for (Entry e : list) {
+            e.dropped = true;
+            if (e.world == current) {
+                applyAll(e);
             }
         }
     }
 
     /** Drop everything pending for one chunk, e.g. on unload (client thread). */
     public static void dropChunk(int cx, int cz) {
-        for (Iterator<Entry> it = QUEUE.iterator(); it.hasNext();) {
-            Entry e = it.next();
-            if (e.cx == cx && e.cz == cz) {
-                it.remove();
+        java.util.ArrayList<Entry> list = BY_CHUNK.remove(chunkKey(cx, cz));
+        if (list != null) {
+            for (Entry e : list) {
+                e.dropped = true;
             }
         }
     }
@@ -100,8 +123,14 @@ public final class DeferredTiles {
         long deadline = System.nanoTime() + budgetNanos;
         while (!QUEUE.isEmpty()) {
             Entry e = QUEUE.peekFirst();
+            if (e.dropped) {
+                // applied or discarded through flushChunk/dropChunk already
+                QUEUE.pollFirst();
+                continue;
+            }
             if (e.world != current) {
                 QUEUE.pollFirst();
+                unlink(e);
                 continue;
             }
             List<NBTTagCompound> tags = e.tags;
@@ -112,6 +141,7 @@ public final class DeferredTiles {
                 }
             }
             QUEUE.pollFirst();
+            unlink(e);
         }
     }
 
@@ -136,6 +166,6 @@ public final class DeferredTiles {
     }
 
     public static int pending() {
-        return QUEUE.size();
+        return BY_CHUNK.size();
     }
 }

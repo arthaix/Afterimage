@@ -33,6 +33,8 @@ public final class LtPreparse {
             t.setPriority(Thread.MIN_PRIORITY + 1);
             return t;
         });
+    private static final int MAX_QUEUED = Integer.getInteger("ltfix.preparseQueue", 256);
+    private static final AtomicLong SKIPPED = new AtomicLong();
     private static final AtomicLong CHUNKS = new AtomicLong();
     private static final AtomicLong LISTS = new AtomicLong();
     private static final AtomicLong NANOS = new AtomicLong();
@@ -58,6 +60,12 @@ public final class LtPreparse {
             }
         }
         if (lt.isEmpty()) {
+            return;
+        }
+        if (POOL.getQueue().size() >= MAX_QUEUED) {
+            // minutes of chunks arrive at once at a login; parsing them all ahead held the tiles of every one of them in
+            // memory next to their tags, so the client thread parses the rest itself when it gets to them
+            SKIPPED.incrementAndGet();
             return;
         }
         CHUNKS.incrementAndGet();
@@ -119,6 +127,6 @@ public final class LtPreparse {
             return "preparse off";
         }
         return "preparse chunks " + CHUNKS.get() + " lists " + LISTS.get() + " used " + USED.get() + " " + (NANOS.get() / 1_000_000L) + "ms queue "
-            + POOL.getQueue().size() + (FAILED.get() > 0 ? " FAILED " + FAILED.get() : "");
+            + POOL.getQueue().size() + " skipped " + SKIPPED.get() + (FAILED.get() > 0 ? " FAILED " + FAILED.get() : "");
     }
 }

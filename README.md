@@ -216,6 +216,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 |---|---|---|
 | `-Dltfix.preparse` | true | parse LittleTiles data from chunk packets in the background |
 | `-Dltfix.preparseThreads` | 3 | threads for that |
+| `-Dltfix.preparseQueue` | 256 | chunks parsed ahead at most; the client thread parses the rest itself when it reaches them |
 | `-Dltfix.pack` | true | keep LittleTiles geometry in the heap and pack what has not been drawn for a while; false keeps it raw in direct memory |
 | `-Dltfix.packAfterMs` | 30000 | time without drawing before geometry is packed |
 | `-Dltfix.packThreads` | 2 | packing threads |

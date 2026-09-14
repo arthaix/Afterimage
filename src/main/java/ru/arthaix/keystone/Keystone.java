@@ -32,7 +32,7 @@ import ru.arthaix.keystone.ltfix.LtFix;
      acceptableRemoteVersions = "*")
 public class Keystone {
     public static final String MODID = "keystone";
-    public static final String VERSION = "1.2.7";
+    public static final String VERSION = "1.2.8";
 
     private ChunkKeep chunkKeep;
 

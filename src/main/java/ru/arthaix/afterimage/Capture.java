@@ -100,6 +100,8 @@ public final class Capture {
 
     private static long vboCreated, vboDeleted, uploads, uploadBytes, unownedUploads, offThreadUploads, hashNanos;
     private static final long[] LIVE = new long[LAYERS];
+    /** bytes in every VertexBuffer that has been uploaded and not deleted, tracked sections or not (VRAM attribution) */
+    private static long allLive;
 
     // ---- fingerprints computed on chunk workers ----
     /** Section uploads are fingerprinted by the chunk worker that finished the buffer (-Dafterimage.workerHash=false: client thread). */
@@ -174,6 +176,7 @@ public final class Capture {
             if (v.afterimage$owner() != null && layer >= 0 && layer < LAYERS) {
                 LIVE[layer] -= v.afterimage$lastSize();
             }
+            allLive -= v.afterimage$lastSize();
             v.afterimage$setLastSize(0);
         } catch (Throwable t) {
             fail("onDelete", t);
@@ -245,6 +248,10 @@ public final class Capture {
         v.afterimage$setLastSize(0);
     }
 
+    public static long allLiveMb() {
+        return allLive >> 20;
+    }
+
     public static long liveMb() {
         long t = 0L;
         for (long l : LIVE) {
@@ -269,6 +276,7 @@ public final class Capture {
             ru.arthaix.keystone.ltfix.GpuTrace.upload(size);
             int prev = v.afterimage$lastSize();
             v.afterimage$setLastSize(size);
+            allLive += size - prev;
             RenderChunk rc = v.afterimage$owner();
             int layer = v.afterimage$layer();
             if (rc == null || layer < 0 || layer >= LAYERS) {

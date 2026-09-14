@@ -1011,12 +1011,12 @@ public final class Far {
 
     /** For hitch reports: far copies in VRAM, tracked vanilla section geometry, free VRAM. */
     public static String gpuState() {
-        return "far " + (bytes >> 20) + "/" + (budgetNow >> 20) + " MB, sections live " + Capture.liveMb() + " MB, vram free " + (availableVram() >> 20) + " MB";
+        return "far " + (bytes >> 20) + "/" + (budgetNow >> 20) + " MB, sections live " + Capture.liveMb() + " MB, all VBOs live " + Capture.allLiveMb() + " MB, vram free " + (availableVram() >> 20) + " MB";
     }
 
     public static String summary() {
         return "far " + (ENABLED ? "ON" : "OFF") + ": sections " + ENTRIES.size() + ", VRAM "
-            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (budgetNow >> 20) + "/" + (BUDGET >> 20) + " MB (lowered " + budgetLowered + "x, immutable " + storage + ", vram free " + (availableVram() >> 20) + " MB), captures " + captures + " (buffers taken " + stolen + ", stale refreshed " + refreshed + "), reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
+            + String.format("%.1f MB", bytes / 1048576.0) + " of " + (budgetNow >> 20) + "/" + (BUDGET >> 20) + " MB (lowered " + budgetLowered + "x, immutable " + storage + ", vram free " + (availableVram() >> 20) + " MB, all VBOs live " + Capture.allLiveMb() + " MB), captures " + captures + " (buffers taken " + stolen + ", stale refreshed " + refreshed + "), reused " + reused + ", settling frames " + settling + ", hiding vanilla sections " + lastHidden + ", fog " + fogEnd + ", invalidated by server " + invalidated
             + ", drops " + drops + ", evictions " + evictions + ", from disk " + diskUploads + " | last frame drawn " + lastDrawn + " (translucent " + lastDrawnTranslucent + ")"
             + ", vanilla " + lastSkippedVanilla + ", culled " + lastCulled + ", errors " + errors;
     }
