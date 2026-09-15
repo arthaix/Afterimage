@@ -87,6 +87,10 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
 - **Immersive Vehicles** textures are decoded off the client thread; **JourneyMap** writes and decodes region images in
   the background.
 - **OnlinePictureFrame** downloads one picture at a time, so pictures stop failing with "Failed to parse GIF".
+- **Immersive Vehicles pack icons with VintageFix.** A content pack whose ID has a character other than letters,
+  digits, `_`, `-` or `.` (for example `miszkolights&signs`) showed the missing texture on all its items: VintageFix's
+  texture scan does not accept such names. Keystone reads those items' models before the atlas is built and adds
+  their icons itself.
 
 ### Lag diagnostics
 
@@ -288,6 +292,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `ru.arthaix.keystone.cbbakecache` | Chisels & Bits baking cache |
 | `ru.arthaix.keystone.umctickfix` | UniversalModCore tile entity tracking |
 | `ru.arthaix.keystone.opffix` | OnlinePictureFrame downloads |
+| `ru.arthaix.keystone.vfcompat` | item icons of Immersive Vehicles packs that VintageFix cannot read |
 
 ## Building
 
@@ -328,4 +333,4 @@ JAVA8_HOME=/path/to/jdk8 ./test.sh      # unit tests in src/test/java
 Minecraft 1.12.2, Forge 14.23.5.2860, MixinBooter 10.x; OpenGL 3.1 for Afterimage.
 
 Optional, each with its own fixes (tested versions): LittleTiles 1.5.14 with CreativeCore 1.10.61, Chisels & Bits
-14.33, UniversalModCore 1.1.4, OnlinePictureFrame 1.5.0, Immersive Vehicles, JourneyMap 5.7.1.
+14.33, UniversalModCore 1.1.4, OnlinePictureFrame 1.5.0, Immersive Vehicles 22.5.0, JourneyMap 5.7.1, VintageFix 0.6.2.

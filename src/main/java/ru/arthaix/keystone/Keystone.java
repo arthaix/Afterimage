@@ -2,6 +2,7 @@ package ru.arthaix.keystone;
 
 import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.common.event.FMLConstructionEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 import net.minecraftforge.fml.common.event.FMLServerStoppingEvent;
@@ -20,6 +21,7 @@ import ru.arthaix.keystone.ltfix.LtFix;
  *   cbbakecache    Chisels & Bits chunk baking cache (client, with Chisels & Bits)
  *   umctickfix     UniversalModCore render scans (client, with UniversalModCore)
  *   opffix         OnlinePictureFrame downloads (client, with OnlinePictureFrame)
+ *   vfcompat       item icons of Immersive Vehicles packs VintageFix cannot read (client)
  *   Afterimage     far city copies and disk cache (client) and chunk change tracking (server); built from its own
  *                  repository and kept as its own mod "afterimage", because client and server recognise each other's
  *                  far-city sync by that mod id
@@ -32,9 +34,17 @@ import ru.arthaix.keystone.ltfix.LtFix;
      acceptableRemoteVersions = "*")
 public class Keystone {
     public static final String MODID = "keystone";
-    public static final String VERSION = "1.2.11";
+    public static final String VERSION = "1.2.12";
 
     private ChunkKeep chunkKeep;
+
+    @Mod.EventHandler
+    public void construct(FMLConstructionEvent event) {
+        if (event.getSide().isClient()) {
+            // before the first atlas stitch (see PackIconSprites)
+            net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(new ru.arthaix.keystone.vfcompat.PackIconSprites());
+        }
+    }
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
