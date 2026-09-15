@@ -22,6 +22,7 @@ public class KeystoneLateLoader implements ILateMixinLoader {
         { "mixins.ltfix.json", "littletiles" },
         { "mixins.cbbakecache.json", "chiselsandbits" },
         { "mixins.umctickfix.json", "universalmodcore" },
+        { "mixins.irfarumc.json", "universalmodcore" },
         { "mixins.opffix.json", "opframe" },
     };
 

@@ -18,7 +18,8 @@ import zone.rong.mixinbooter.IEarlyMixinLoader;
 public class KeystoneCore implements IFMLLoadingPlugin, IEarlyMixinLoader {
     @Override
     public List<String> getMixinConfigs() {
-        return Arrays.asList("mixins.teunloadbatch.json", "mixins.chunkkeep.json", "mixins.packetbudget.json", "mixins.afterimage.json");
+        return Arrays.asList("mixins.teunloadbatch.json", "mixins.chunkkeep.json", "mixins.packetbudget.json", "mixins.afterimage.json",
+            "mixins.irfar.json");
     }
 
     @Override

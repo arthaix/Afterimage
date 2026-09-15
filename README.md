@@ -91,6 +91,13 @@ for LittleTiles, Chisels & Bits, UniversalModCore and OnlinePictureFrame only wh
   digits, `_`, `-` or `.` (for example `miszkolights&signs`) showed the missing texture on all its items: VintageFix's
   texture scan does not accept such names. Keystone reads those items' models before the atlas is built and adds
   their icons itself.
+- **Immersive Railroading stays in sight.** A dedicated server sends entities to a player only within its
+  view-distance (80 blocks at 6) and only in chunks the player watches, so trains vanished as soon as you moved away,
+  and rails disappeared with their chunks. Trains and other UniversalModCore entities are now sent to each player up to
+  1.5x the render distance that player set (at most 1024 blocks), kept and animated where the client has no chunk and
+  drawn there at sky light. Rails and other UniversalModCore blocks of chunks the client unloads keep being drawn within
+  that range until the chunk is loaded again. `-Dirfar.factor` (1.5), `-Dirfar.maxBlocks` (1024), `-Dirfar.enabled=false`;
+  install Keystone on the server and the client.
 
 ### Lag diagnostics
 
@@ -299,6 +306,7 @@ Everything works with the defaults; these are for tuning and for turning a part 
 | `ru.arthaix.keystone.umctickfix` | UniversalModCore tile entity tracking |
 | `ru.arthaix.keystone.opffix` | OnlinePictureFrame downloads |
 | `ru.arthaix.keystone.vfcompat` | item icons of Immersive Vehicles packs that VintageFix cannot read |
+| `ru.arthaix.keystone.irfar` | Immersive Railroading / UniversalModCore view range: entity tracking, far entities and kept tile entities |
 
 ## Building
 

@@ -22,6 +22,7 @@ import ru.arthaix.keystone.ltfix.LtFix;
  *   umctickfix     UniversalModCore render scans (client, with UniversalModCore)
  *   opffix         OnlinePictureFrame downloads (client, with OnlinePictureFrame)
  *   vfcompat       item icons of Immersive Vehicles packs VintageFix cannot read (client)
+ *   irfar          Immersive Railroading / UniversalModCore trains and rails visible to 1.5x render distance (both sides)
  *   Afterimage     far city copies and disk cache (client) and chunk change tracking (server); built from its own
  *                  repository and kept as its own mod "afterimage", because client and server recognise each other's
  *                  far-city sync by that mod id
@@ -34,7 +35,7 @@ import ru.arthaix.keystone.ltfix.LtFix;
      acceptableRemoteVersions = "*")
 public class Keystone {
     public static final String MODID = "keystone";
-    public static final String VERSION = "1.2.13";
+    public static final String VERSION = "1.3.0";
 
     private ChunkKeep chunkKeep;
 
@@ -50,6 +51,9 @@ public class Keystone {
     public void preInit(FMLPreInitializationEvent event) {
         if (Loader.isModLoaded("littletiles")) {
             new LtFix().preInit(event);
+        }
+        if (event.getSide().isClient() && Loader.isModLoaded("universalmodcore") && ru.arthaix.keystone.irfar.IrFar.ENABLED) {
+            net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(new ru.arthaix.keystone.irfar.IrFarClient());
         }
         if (event.getSide().isServer()) {
             this.chunkKeep = new ChunkKeep();

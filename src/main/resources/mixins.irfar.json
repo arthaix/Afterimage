@@ -1,0 +1,17 @@
+{
+  "package": "ru.arthaix.keystone.irfar.mixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "mixins": [
+    "MixinEntityTrackerEntryFar",
+    "MixinNetHandlerPlayServerFar",
+    "CPacketClientSettingsAccessor"
+  ],
+  "client": [
+    "MixinRenderManagerFar",
+    "MixinEntityBrightnessFar"
+  ],
+  "server": []
+}

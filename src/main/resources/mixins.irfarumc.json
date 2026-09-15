@@ -1,0 +1,14 @@
+{
+  "package": "ru.arthaix.keystone.irfar.umcmixin",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "required": true,
+  "setSourceFile": true,
+  "mixins": [
+    "MixinModdedEntityFar"
+  ],
+  "client": [
+    "MixinEntityRendererFar"
+  ],
+  "server": []
+}
