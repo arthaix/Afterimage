@@ -139,6 +139,10 @@ everything you have seen is back the moment you rejoin.
   loading does not count). On join the client asks for everything since its last sync and drops copies and cached files
   made before those changes; while playing, new changes arrive every second. Caches of different worlds on one server
   stay apart.
+- **Follows the texture layout**: copies store texture coordinates in the block texture atlas, and adding or removing
+  any texture (a mod, a resource pack) moves most of them. The cache remembers a fingerprint of the layout it was made
+  with; when the layout differs at start-up the old cache is moved aside and deleted in the background, so far terrain
+  never shows other textures (roads as grass). A resource reload that changes the layout also drops the copies in VRAM.
 - **Measures itself**: live section-geometry VRAM, unique meshes, per-section sizes (`sections.csv`) and raw geometry
   samples for offline analysis.
 
@@ -169,6 +173,8 @@ Everything lives in `minecraft/afterimage/`:
 |---|---|
 | `cache/<server>/[<world id>/]DIM<n>/r.<rx>.<rz>/<cx>.<sy>.<cz>.L<layer>.aimg` | cached section geometry (world id when the server has Keystone) |
 | `cache/<server>/<world id>/DIM<n>/sync.txt` | last server tick whose changes this cache has applied |
+| `cache/atlas.txt` | fingerprint of the block texture layout the cache was made with |
+| `cache-stale-<time>/` | a cache made with another texture layout, being deleted in the background |
 | `summary.log` | one status line per minute |
 | `verify.log`, `mismatch/` | verifier results and dumps of any mismatch |
 | `sections.csv`, `samples/` | measurements for the tools below |

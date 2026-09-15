@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -55,6 +56,9 @@ import net.minecraft.util.math.ChunkPos;
  * first, up to the far-zone VRAM budget, inflated off-thread and handed to the main thread, which uploads them
  * to GPU buffers for at most 4 ms per frame. Sections vanilla already shows, or that have a live in-memory copy,
  * are not taken from disk.
+ * Texture layout: the vertices carry block atlas coordinates, so the cache is only valid for the atlas it was written
+ * with. Its fingerprint (AtlasGuard) is kept in cache/atlas.txt; a cache without the current one is moved to
+ * cache-stale-<time> and deleted in the background.
  */
 public final class Disk {
     public static volatile boolean ENABLED = !"false".equals(System.getProperty("afterimage.disk"));
@@ -72,6 +76,14 @@ public final class Disk {
     private static volatile File worldDir;
     private static volatile int generation;
     private static boolean scanPending;
+
+    private static final String ATLAS_FILE = "atlas.txt";
+    private static final String STALE_SUFFIX = "-stale-";
+    /** Atlas fingerprint that arrived before init */
+    private static volatile long pendingAtlas;
+    /** While a cache made with another atlas layout is moved away: no scan starts. */
+    private static volatile boolean discarding;
+    private static final AtomicLong ATLAS_DISCARDS = new AtomicLong();
 
     private static final class Job {
         final long sk;
@@ -231,6 +243,127 @@ public final class Disk {
     public static void init(File cacheRoot) {
         root = cacheRoot;
         root.mkdirs();
+        deleteStale();
+        long pending = pendingAtlas;
+        if (pending != 0L) {
+            pendingAtlas = 0L;
+            checkAtlas(pending);
+        }
+    }
+
+    /**
+     * Client thread, after every stitch of the block atlas (AtlasGuard). Cached vertices hold texture coordinates of the
+     * atlas they were made with and show other textures once the layout differs, so a cache without the current
+     * fingerprint is moved aside and deleted in the background, and the fingerprint is recorded for the new cache.
+     */
+    public static void checkAtlas(long signature) {
+        if (root == null) {
+            pendingAtlas = signature;
+            return;
+        }
+        final String want = Long.toHexString(signature);
+        final File marker = new File(root, ATLAS_FILE);
+        if (want.equals(readText(marker))) {
+            return;
+        }
+        discarding = true;
+        generation++;
+        ONDISK.clear();
+        ONDISK_TIME.clear();
+        LATEST.clear();
+        PENDING_DELETE.clear();
+        clearHeld();
+        Loaded l;
+        while ((l = READY.poll()) != null) {
+            READY_BYTES.addAndGet(-l.data.capacity());
+            DirectPool.release(l.data);
+        }
+        final File cacheRoot = root;
+        final File world = worldDir;
+        WRITER.submit(() -> discardAll(cacheRoot, world, marker, want));
+    }
+
+    /** Writer thread: after the jobs of the old generation, before any of the new one. */
+    private static void discardAll(File cacheRoot, File world, File marker, String want) {
+        try {
+            File[] kids = cacheRoot.listFiles();
+            boolean content = false;
+            if (kids != null) {
+                for (File k : kids) {
+                    if (!k.getName().startsWith(ATLAS_FILE)) {
+                        content = true;
+                        break;
+                    }
+                }
+            }
+            if (content) {
+                File stale = new File(cacheRoot.getParentFile(), cacheRoot.getName() + STALE_SUFFIX + System.currentTimeMillis());
+                boolean moved;
+                try {
+                    Files.move(cacheRoot.toPath(), stale.toPath());
+                    moved = true;
+                } catch (IOException e) {
+                    // a file inside is still open (the loader of the old generation): delete in place
+                    moved = false;
+                }
+                if (moved) {
+                    cacheRoot.mkdirs();
+                    deleteInBackground(stale);
+                } else {
+                    for (File k : kids) {
+                        if (!k.getName().startsWith(ATLAS_FILE)) {
+                            deleteTree(k);
+                        }
+                    }
+                }
+                ATLAS_DISCARDS.incrementAndGet();
+                Capture.logInfo("disk: cache discarded, it was made with another block texture layout (now " + want + ")");
+            }
+            if (world != null) {
+                world.mkdirs();
+            }
+            writeText(marker, want);
+        } catch (Throwable t) {
+            ERRORS.incrementAndGet();
+            Capture.logError("disk.atlas", t);
+        } finally {
+            discarding = false;
+        }
+    }
+
+    /** Leftovers of a discard the game did not finish deleting. */
+    private static void deleteStale() {
+        File parent = root.getParentFile();
+        File[] kids = parent == null ? null : parent.listFiles();
+        if (kids == null) {
+            return;
+        }
+        for (File k : kids) {
+            if (k.isDirectory() && k.getName().startsWith(root.getName() + STALE_SUFFIX)) {
+                deleteInBackground(k);
+            }
+        }
+    }
+
+    private static void deleteInBackground(final File f) {
+        Thread t = new Thread(() -> deleteTree(f), "Afterimage Cache Cleanup");
+        t.setDaemon(true);
+        t.setPriority(Thread.MIN_PRIORITY);
+        t.start();
+    }
+
+    private static String readText(File f) {
+        try {
+            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim() : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static void writeText(File f, String text) throws IOException {
+        File tmp = new File(f.getPath() + ".tmp");
+        Files.write(tmp.toPath(), text.getBytes(StandardCharsets.UTF_8));
+        Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING);
     }
 
     // ================= world lifecycle (main thread) =================
@@ -443,7 +576,7 @@ public final class Disk {
             return;
         }
         Minecraft mc = Minecraft.func_71410_x();
-        if (scanPending && mc.field_71439_g != null) {
+        if (scanPending && !discarding && mc.field_71439_g != null) {
             scanPending = false;
             EntityPlayer p = mc.field_71439_g;
             final double px = p.field_70165_t;
@@ -1064,6 +1197,6 @@ public final class Disk {
             + "), deleted " + DELETED.get() + ", loaded " + LOADED_FILES.get() + " ("
             + String.format("%.0f MB", LOADED_RAW.get() / 1048576.0) + "), to GPU " + uploadedFromDisk + ", skipped "
             + rejectedFromDisk + ", over budget " + OVER_BUDGET.get() + ", backlog "
-            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", uploads confirmed later " + heldCommitted + ", dropped as not owned " + heldDropped + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", superseded " + SUPERSEDED.get() + ", corrupt deleted " + CORRUPT_DELETED.get() + ", pruned " + PRUNED_FILES.get() + " (" + (PRUNED_BYTES.get() >> 20) + " MB)" + ", errors " + ERRORS.get();
+            + String.format("%.0f MB", BACKLOG.get() / 1048576.0) + ", uploads confirmed later " + heldCommitted + ", dropped as not owned " + heldDropped + ", invalidated by server " + INVALIDATED_FILES.get() + ", outdated skipped " + OUTDATED_SKIPPED.get() + ", superseded " + SUPERSEDED.get() + ", corrupt deleted " + CORRUPT_DELETED.get() + ", pruned " + PRUNED_FILES.get() + " (" + (PRUNED_BYTES.get() >> 20) + " MB)" + ", discarded for texture layout " + ATLAS_DISCARDS.get() + ", errors " + ERRORS.get();
     }
 }
